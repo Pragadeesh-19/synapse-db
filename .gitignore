@@ -1,0 +1,14 @@
+# Maven build output
+target/
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+
+# Claude Code / gstack local agent config (not team-shared)
+.claude/
+
+# OS noise
+.DS_Store
+Thumbs.db

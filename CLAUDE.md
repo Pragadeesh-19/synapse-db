@@ -1,0 +1,390 @@
+# Synapse-DB - Claude Code Project Context
+**Version 1.2 | Java 21 | Spring Boot 3.x | No external database**
+
+> **Revised 2026-06-06 by Phase 1 `/plan-eng-review`.** Eight design decisions
+> override the original v1.1 spec: 8 arrays (not 9 — `thoughtIds` dropped), slot 0
+> reserved as a never-evicted synthetic root, per-agent array slices (not one flat
+> `absoluteIndex` array), explicit `-1` FCNS init, salience seeded from parent,
+> caller-provided path buffer, fail-fast config validation, and single-writer-only
+> for V1. Changed sections are marked **[v1.2]**.
+
+---
+
+## What This Project Is
+
+Synapse-DB is an in-memory graph database for autonomous AI agent reasoning trees.
+It stores a directed acyclic graph of agent "thoughts" as flat parallel primitive arrays
+(Struct-of-Arrays layout) for CPU L1/L2 cache coherence. Persistence is via pre-allocated
+memory-mapped binary ring files — no Elasticsearch, no external process.
+
+The core performance contract: append a thought in O(1), find best next thought in O(degree),
+backtrack to root in O(depth). GC pauses on the hot path: zero.
+
+---
+
+## Commands
+
+```bash
+mvn spring-boot:run                         # Start the server (port 8080)
+mvn test                                    # Run unit tests
+mvn test -pl . -Dtest=*BenchmarkTest        # Run JMH benchmarks
+mvn clean package -DskipTests              # Build the fat JAR
+curl http://localhost:8080/swagger-ui.html  # API docs
+```
+
+---
+
+## Architecture — Read This Before Touching Any File
+
+### The Core Data Structure **[v1.2]**
+
+The graph is stored as EIGHT parallel primitive arrays in one class: `SynapseGraph`.
+Never add object arrays. Never create a `Node` class. Every thought is represented
+by its local slot index across these arrays.
+
+```
+int[]   parentIds        // parent slot in same shard
+int[]   firstChild       // FCNS: parent → first child slot (-1 = none)
+int[]   nextSibling      // FCNS: child → next sibling slot (-1 = none)
+float[] successScores    // reinforcement signal [-1.0, 1.0]
+int[]   stateHashes      // environment state fingerprint (int hash, not vector)
+int[]   sessionIds       // run/conversation identifier
+long[]  timestamps       // epoch millis at write time (0 = empty/never-written slot)
+float[] salienceScores   // accumulated Hebbian weight, clamped [0.0, 1.0]
+```
+
+`thoughtIds` was DROPPED (v1.1 had 9 arrays). It always equalled the slot index, so
+it stored zero information while costing ~256 MB of cache-competing memory. The slot
+index *is* the thought ID; derive it directly. An empty (never-written) slot is
+detected by `timestamps[slot] == 0` — epoch-0 writes never happen.
+
+### Sharding **[v1.2]**
+
+Each agent owns its OWN set of 8 arrays, allocated lazily on registration (~36 MB
+per agent). v1.1 specified one flat array per field sized `MAX_AGENTS * SHARD_SIZE`
+(~2.4 GB committed at startup regardless of real agent count); this was changed
+because agents never share cache lines (shards are megabytes apart), so per-agent
+slices give identical cache locality at a fraction of the memory.
+```
+SHARD_SIZE = 1 << 20  (1,048,576 slots per agent — must be power of 2)
+Each agent's arrays are indexed by localSlot directly — there is NO global
+absoluteIndex / base offset anymore. parentIds/firstChild/nextSibling are all
+local slot indices within the agent's own arrays.
+Usable capacity per agent: SHARD_SIZE - 1 (slot 0 is the reserved root).
+```
+
+Never mix agent data. Never let one agent read another agent's arrays.
+
+### Ring Buffer **[v1.2]**
+
+**Slot 0 is a reserved, never-evicted synthetic root.** Ring writes occupy slots
+`[1, SHARD_SIZE - 1]`. The write head starts at 1 and skips 0 on wrap. This keeps
+`getPathToRoot`'s `while (ptr != 0)` terminus valid forever — v1.1 let the ring wrap
+overwrite slot 0, destroying root identity on the first full wrap.
+
+Within each shard, the write head wraps using a bitmask — never modulo:
+```java
+int local = writeHead & SHARD_MASK;   // NOT: writeHead % SHARD_SIZE
+if (local == 0) local = 1;            // skip the reserved root slot on wrap
+```
+
+When a slot is overwritten (ring wrap):
+1. Reset `firstChild[slot] = -1` and `nextSibling[slot] = -1` for the evicted slot
+2. V1 known limitation: sibling chains pointing TO the evicted slot become stale.
+   This is NOT a harmless dangling pointer — a reused slot can splice an unrelated
+   subtree into a walk or form a cycle. V1 mitigation: the FCNS sibling walk is
+   BOUNDED (see getBestNextThought) so a corrupted chain returns a bounded result
+   instead of hanging the read path. Full cure (epoch tags) is deferred — see
+   TODOS.md `T-EPOCH`.
+
+### FCNS Invariant (Critical) **[v1.2]**
+
+Every append must update FCNS as a prepend to the parent's child list:
+```java
+nextSibling[slot]       = firstChild[parentSlot];  // step 1: link new → old first
+firstChild[parentSlot]  = slot;                     // step 2: parent → new child
+```
+Order matters. Step 1 always before step 2.
+
+### Key Invariant **[v1.2]**
+
+The slot index IS the thought ID — there is no `thoughtIds` array to keep in sync.
+Parent and sibling references are local slot indices within the same agent's arrays.
+`parentIds[ptr]` is an O(1) parent lookup (no base offset — per-agent arrays).
+Arrays must be initialized with `firstChild`/`nextSibling` filled to `-1` at
+construction (Java zero-inits to 0, which would make slot 0 look like everyone's
+child).
+
+---
+
+## Algorithms
+
+### getPathToRoot — O(depth) **[v1.2]**
+Writes into a CALLER-PROVIDED buffer (zero allocation on the query path — never
+`new int[]` per call). Slot 0 (root) is the terminus and is not included in the path.
+```java
+int count = 0;
+while (ptr != 0 && count < maxDepth) {
+    out[count++] = ptr;
+    ptr = parentIds[ptr];  // direct array read, no pointer chase, no base offset
+}
+return count;  // number of slots written into out[]
+```
+
+### getBestNextThought — O(degree), NOT O(n) **[v1.2]**
+The sibling walk is BOUNDED (max iterations) so a stale/cyclic chain from ring
+eviction can never hang the read path — mirrors getPathToRoot's maxDepth guard.
+```java
+int child = firstChild[currentSlot];   // jump to first child
+int guard = 0;
+while (child != -1 && guard++ < SHARD_SIZE) {
+    float score = hebbianScore(child, sessionId, now);
+    // track best
+    child = nextSibling[child];          // jump to next sibling
+}
+```
+NEVER scan the full shard looking for `parentIds[i] == currentSlot`. That is O(n) and was explicitly rejected in design review.
+
+### Hebbian Scoring Formula
+```
+Score = successScore[i] * salienceScore[i] * exp(-λ * ΔTime) * sessionBoost
+
+ΔTime = (now - timestamps[i]) / DECAY_UNIT_MS
+λ = 0.1 (default, configurable via SYNAPSE_LAMBDA env var)
+sessionBoost = sessionIds[i] == currentSessionId ? 2.0f : 1.0f
+```
+
+### Salience Update (Hebbian rule, on every append) **[v1.2]**
+A new thought SEEDS its salience from its parent, then adjusts by its own
+`successScore` (the "reinforcement"). The root (slot 0) seeds at `ROOT_BASE_SALIENCE`
+(default 0.5, configurable). This is why a freshly appended thought can already read
+e.g. 0.38 in the API example — it inherited most of it from the parent.
+```java
+float parentSalience = salienceScores[parentSlot];
+float updated = parentSalience + LEARNING_RATE * successScore;  // LEARNING_RATE = 0.1
+return Math.max(0.0f, Math.min(1.0f, updated));                 // clamp to [0, 1]
+```
+
+---
+
+## Persistence: Binary Ring File (NOT Elasticsearch)
+
+No Elasticsearch. No JSON serialization. No external process.
+
+Each agent has one pre-allocated binary file: `./data/agent-{agentId}.bin`
+File size: 64 bytes header + 1,048,576 × 32 bytes records = ~32 MB per agent.
+
+```
+Header (64 bytes):
+  [0]  magic         long  (0x53594E41505345_44L)
+  [8]  version       int   (1)
+  [12] agentId       int
+  [16] writeHead     long  (monotonic counter)
+  [24] activeSession int
+  [28] reserved      36B
+
+Record at offset 64 + (localSlot × 32):
+  [+0]  slotIndex     int
+  [+4]  parentSlot    int
+  [+8]  stateHash     int
+  [+12] sessionId     int
+  [+16] successScore  float
+  [+20] salienceScore float
+  [+24] timestamp     long
+```
+
+`firstChild` and `nextSibling` are NOT written to the ring file.
+They are reconstructed from `parentSlot` relationships during bootstrap (one O(n) pass).
+
+Write path: `MappedByteBuffer.putXXX()` — writes go to OS page cache, no syscall, no GC.
+The OS flushes to disk. Never call `mmap.force()` on the hot path.
+
+---
+
+## Package Layout
+
+```
+com.synapsedb
+├── core/
+│   ├── SynapseGraph.java        # The 8 arrays, per-agent slices, ring buffer, append + FCNS
+│   ├── MemoryConfig.java        # Constants: SHARD_SIZE, MAX_AGENTS, LAMBDA, etc. (fail-fast validated)
+│   ├── HebbianScorer.java       # Score formula, sessionBoost, decay math
+│   ├── BestPathQuery.java       # getBestNextThought (FCNS walk), getPathToRoot
+│   └── BestNextResult.java      # Record: bestSlot, bestScore
+│
+├── persistence/
+│   ├── AgentRingFile.java       # MappedByteBuffer management, writeRecord(), bootstrapInto()
+│   └── RingFileHeader.java      # Read/write the 64-byte file header
+│
+├── api/
+│   ├── controller/
+│   │   ├── AgentController.java     # POST /api/v1/agents
+│   │   ├── ThoughtController.java   # POST /thoughts, GET /path-to-root, GET /best-next
+│   │   └── MemoryController.java    # POST /bootstrap, GET /stats
+│   ├── dto/                         # Request + Response records (one per endpoint)
+│   └── auth/
+│       ├── ApiKeyFilter.java        # OncePerRequestFilter: SHA-256 hash → lookup
+│       └── AgentContext.java        # Request-scoped: agentId, label
+│
+├── config/
+│   ├── ApiKeyConfigLoader.java  # Load api-keys.yml → ConcurrentHashMap at startup
+│   └── SynapseEngineConfig.java # @Bean wiring: SynapseGraph, BestPathQuery, AgentRingFile[]
+│
+└── SynapseDbApplication.java
+```
+
+---
+
+## API Endpoints
+
+| Method | Path | What it does |
+|--------|------|-------------|
+| POST | /api/v1/agents | Register agent, create ring file, return agentId + apiKey |
+| POST | /api/v1/agents/{id}/thoughts | Append thought (O1 hot path) |
+| GET | /api/v1/agents/{id}/thoughts/best-next | FCNS walk + Hebbian score |
+| GET | /api/v1/agents/{id}/thoughts/path-to-root | Backtrack to root |
+| POST | /api/v1/agents/{id}/bootstrap | Reload shard from ring file |
+| GET | /api/v1/agents/{id}/memory/stats | Fill %, write head, session info |
+
+All endpoints require `X-Api-Key` header. Auth is a servlet filter, not per-controller.
+
+### Append request/response shape
+```json
+// POST /api/v1/agents/{agentId}/thoughts
+// Request:
+{ "parentId": 42, "stateHash": 99482, "successScore": 0.8, "sessionId": 7 }
+
+// Response 201:
+{ "thoughtId": 43, "slotIndex": 43, "salienceScore": 0.38, "persisted": true }
+```
+
+---
+
+## Authentication
+
+API keys are SHA-256 hashed and stored in `config/api-keys.yml`.
+Loaded at startup into `ConcurrentHashMap<String, AgentKeyRecord>`.
+Auth filter: hash the raw key from `X-Api-Key` header → map lookup → verify agentId matches path variable.
+No database. No runtime writes to the key file (V1).
+
+Raw key format: `sk_syn_{UUID without dashes}`
+Key is returned once at registration. Hash is stored. Raw key is never stored again.
+
+---
+
+## Concurrency Rules **[v1.2]**
+
+- **V1 is single-writer-per-shard ONLY** — plain array writes, no synchronization.
+  This is correct and meets the single-threaded perf targets.
+- The v1.1 multi-writer recipe (`VarHandle.getAndAdd()` claim + plain writes +
+  `releaseFence()`, FCNS under a `ReentrantLock`) is SHELVED to V2: it has a
+  publication-ordering gap (a reader walking `firstChild` can see the link before the
+  slot's data is visible) and relies on non-atomic `long` writes. Do NOT build on it.
+  See TODOS.md `T-MULTIWRITER` for the correct acquire/release + `VarHandle` design.
+- Never use `synchronized` blocks on `SynapseGraph` methods — too coarse
+- Cross-agent reads are read-only (MESI Shared state) — no synchronization needed
+
+---
+
+## Performance Targets (JMH)
+
+Verify these at the end of Phase 1 and Phase 3:
+
+| Operation | Target |
+|-----------|--------|
+| Append (single-threaded) | < 1 μs (> 1M/sec) |
+| Path-to-root, depth 50 | < 10 μs |
+| Best-next, degree 5 | < 5 μs |
+| Bootstrap, 1M records | < 200 ms |
+
+If append exceeds 1 μs, check: (1) FCNS lock contention, (2) MappedByteBuffer flush being called, (3) accidental heap allocation in the hot path.
+
+---
+
+## What NOT to Do
+
+- Do NOT create a `Node` class or any object to represent thoughts
+- Do NOT use `%` for ring buffer index calculation — always use `& SHARD_MASK`
+- Do NOT scan `parentIds[]` to find children — use `firstChild[]` / `nextSibling[]`
+- Do NOT add Elasticsearch as a dependency
+- Do NOT call `mmap.force()` on the hot path (only via explicit endpoint if needed)
+- Do NOT store `firstChild` or `nextSibling` in the ring file — reconstruct on bootstrap
+- Do NOT return raw API keys after the registration response
+- Do NOT let agents access each other's shard ranges
+
+---
+
+## Implementation Phases
+
+Build in this exact order — do not skip to the API layer before the core engine is benchmarked:
+
+1. **Phase 1 (Weeks 1-2):** `SynapseGraph` with all 8 arrays, append + FCNS + ring
+   eviction, `getPathToRoot`, bounded walk guard — JMH benchmarks must pass before
+   proceeding. NOTE: the eviction+reuse no-hang test is Phase 1 (eviction lives in
+   `append`), not Phase 3.
+2. **Phase 2 (Week 3):** `AgentRingFile` — write record + bootstrap roundtrip test
+3. **Phase 3 (Week 4):** `HebbianScorer` + `BestPathQuery` — full end-to-end flow
+4. **Phase 4 (Weeks 5-6):** Spring Boot API layer — all 5 endpoints
+5. **Phase 5 (Week 7):** Docker — single image, no compose, mount `/data` volume
+6. **Phase 6 (Weeks 8-9):** Checksums, rate limiting (Bucket4j), Micrometer metrics
+
+---
+
+## V2 Roadmap (Do NOT implement in V1)
+
+- Compaction Forward: copy high-salience thoughts before ring eviction
+- Per-slot epoch/generation tags to fully cure stale FCNS chains (TODOS.md `T-EPOCH`)
+- Race-free multi-writer-per-shard concurrency (TODOS.md `T-MULTIWRITER`)
+- WAL file rotation for long-running agents
+- Checksum per record for crash safety (V1 known limitation)
+- Off-heap migration via Java 21 FFM API (only if GC benchmarks show need)
+- Cosine similarity / ONNX Runtime vector extension
+
+---
+
+## Environment Variables
+
+```
+SYNAPSE_MAX_AGENTS=64              # Must match pre-allocated array sizes
+SYNAPSE_SHARD_SIZE=1048576         # Must be power of 2
+SYNAPSE_LAMBDA=0.1                 # Hebbian decay constant
+SYNAPSE_DECAY_UNIT_MS=3600000      # 1 hour in millis
+SYNAPSE_LEARNING_RATE=0.1          # Salience update rate
+SYNAPSE_ROOT_BASE_SALIENCE=0.5     # [v1.2] root slot 0 seed salience (children inherit)
+SYNAPSE_DATA_DIR=./data            # Ring file directory
+SYNAPSE_CONFIG_DIR=./config        # api-keys.yml location
+SYNAPSE_EMOTIONAL_THRESHOLD=0.7    # Salience threshold for V2 compaction (unused in V1)
+```
+
+## gstack
+
+Use the `/browse` skill from gstack for all web browsing. Never use `mcp__claude-in-chrome__*` tools.
+
+Available skills:
+/office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /setup-browser-cookies, /setup-deploy, /setup-gbrain, /retro, /investigate, /document-release, /document-generate, /codex, /cso, /autoplan, /plan-tune, /plan-devex-review, /devex-review, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn
+
+## Synapse-DB Skill Routing
+
+This is a pure Java 21 backend microservice. No UI. No browser. No design.
+Run skills in this order per phase — do not skip ahead.
+
+RELEVANT:
+/plan-eng-review  → Run before coding each phase. Reviews architecture.
+/review           → Run after each phase's code is written. Staff engineer review.
+/investigate      → Run when JMH benchmarks don't hit targets, or tests fail unexpectedly.
+/cso              → Run after Phase 4 (API layer + auth complete). OWASP + STRIDE audit.
+/ship             → Run after /review passes. Commits + opens PR per phase.
+/document-release → Run after /ship. Keeps ARCHITECTURE.md, README, CLAUDE.md current.
+/careful          → Activate when editing SynapseGraph.java (core engine — dangerous).
+/freeze           → Lock edits to one package while debugging (e.g., freeze to core/).
+/guard            → /careful + /freeze together. Use when touching ring file logic.
+/retro            → Run weekly. Check shipping velocity, test health.
+/learn            → Save JMH discoveries, Java 21 quirks, FCNS invariants across sessions.
+
+NOT RELEVANT (do not run these):
+/qa, /qa-only           → Browser QA. No UI in this project.
+/design-*, /ios-*       → No UI, no iOS.
+/browse, /benchmark     → Web browser tools. Not applicable.
+/land-and-deploy        → Deployment pipeline. V1 ships as Docker image, not to a live URL.
+/plan-design-review     → Design skill. Backend only.
+/canary                 → SRE monitoring for live web deployments. Not applicable yet.
