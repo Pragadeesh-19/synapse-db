@@ -60,3 +60,21 @@ Tracked follow-ups from `/plan-eng-review` (Phase 1 design review, 2026-06-06).
   ensures the decoupling didn't silently move the hot path out of benchmark coverage.
 - **Depends on / blocked by:** Phase 4 `SynapseEngineConfig` wiring of `AgentRingFile`
   into the append path.
+
+## T-BESTNEXT-DEGREE-BENCH — Benchmark getBestNextThought at high degree (P3)
+
+- **What:** A JMH benchmark of `getBestNextThought` at degree 50 and 500, asserting
+  the per-call cost scales ~linearly with degree (confirms the O(degree) contract and
+  that `exp`-per-child stays within budget at high fan-out).
+- **Why:** The Phase 3 exit gate only measures degree-5 (`<5µs`). With the sibling-walk
+  bound set to `shardSize` (Phase 3 eng-review D2, not a small cap), a legitimately
+  high-degree node scans many siblings; nothing verifies the cost stays linear at, say,
+  degree 500. A super-linear surprise there would go unnoticed until production.
+- **Pros:** Scaling confidence for the read path; one extra `@Benchmark` method reusing
+  the `BestNextBenchmark` harness; catches a regression at the phase boundary.
+- **Cons:** Not required by any current spec target (CLAUDE.md names only degree-5);
+  may stay untouched if real workloads never produce high-degree nodes.
+- **Context:** Decided in Phase 3 `/plan-eng-review` (D6). Phase 3 ships the degree-5
+  gate; this is the deferred scaling-confidence follow-up. Lives alongside the
+  `BestNextBenchmark` added in Phase 3.
+- **Depends on / blocked by:** `BestNextBenchmark` (Phase 3).
