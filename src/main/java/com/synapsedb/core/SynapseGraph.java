@@ -181,6 +181,47 @@ public final class SynapseGraph {
         return count;
     }
 
+    /**
+     * Walk the FCNS sibling chain from {@code currentSlot}'s first child and return
+     * the child with the highest Hebbian score. O(degree).
+     *
+     * <p>Phase 3 eng-review decisions applied here:
+     * <ul>
+     *   <li>D1: method lives in-engine (direct array access, no wrapper class).</li>
+     *   <li>D2: guard bound = {@code shardSize}, matching {@link #countChildren} —
+     *       NOT a small cap (64) that would silently truncate high-degree nodes.</li>
+     *   <li>D3: ΔTime uses smooth double division + max(0,…) clamp via
+     *       {@link HebbianScorer#score}.</li>
+     *   <li>D4: clock read ONCE before the loop; slots with {@code timestamp==0} are
+     *       skipped (defensive against stale ring-eviction links, T-EPOCH); returns
+     *       {@link BestNextResult#NONE} when no valid child exists.</li>
+     * </ul>
+     */
+    public BestNextResult getBestNextThought(int agentId, int currentSlot, int currentSessionId) {
+        Shard s = shard(agentId);
+        long now = clock.getAsLong();           // D4: single clock read
+        float lambda = config.lambda();
+        long decayUnitMs = config.decayUnitMs();
+        int bestSlot = -1;
+        float bestScore = Float.NEGATIVE_INFINITY;
+        int child = s.firstChild[currentSlot];
+        int guard = 0;
+        while (child != -1 && guard++ < shardSize) { // D2: shardSize bound
+            if (s.timestamps[child] != 0L) {          // D4: skip empty/evicted slots
+                float sc = HebbianScorer.score(
+                        s.successScores[child], s.salienceScores[child],
+                        s.timestamps[child], s.sessionIds[child],
+                        now, currentSessionId, lambda, decayUnitMs);
+                if (sc > bestScore) {
+                    bestScore = sc;
+                    bestSlot = child;
+                }
+            }
+            child = s.nextSibling[child];
+        }
+        return bestSlot == -1 ? BestNextResult.NONE : new BestNextResult(bestSlot, bestScore);
+    }
+
     /** First child slot of {@code parentSlot}, or -1. */
     public int firstChild(int agentId, int parentSlot) {
         return shard(agentId).firstChild[parentSlot];
