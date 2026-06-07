@@ -203,6 +203,22 @@ public final class SynapseGraph {
         return shard(agentId).timestamps[slot] != 0L;
     }
 
+    public long timestampOf(int agentId, int slot) {
+        return shard(agentId).timestamps[slot];
+    }
+
+    public int sessionIdOf(int agentId, int slot) {
+        return shard(agentId).sessionIds[slot];
+    }
+
+    public int stateHashOf(int agentId, int slot) {
+        return shard(agentId).stateHashes[slot];
+    }
+
+    public float successScoreOf(int agentId, int slot) {
+        return shard(agentId).successScores[slot];
+    }
+
     /** Monotonic write head for the agent (used by stats / persistence). */
     public long writeHead(int agentId) {
         return shard(agentId).writeHead;
@@ -229,6 +245,70 @@ public final class SynapseGraph {
     /** Test-only hook to inject a corrupted/cyclic sibling chain (T6 walk-guard test). */
     void unsafeSetNextSibling(int agentId, int slot, int value) {
         shard(agentId).nextSibling[slot] = value;
+    }
+
+    // ── Persistence support (Phase 2) ────────────────────────────────────────
+
+    /**
+     * Raw-load one persisted record into the agent's arrays without recomputing any
+     * derived field. Called only by {@code AgentRingFile.bootstrapInto()} (Phase 2).
+     *
+     * <p>Preserves the EXACT values from disk — salience and timestamp are restored
+     * as-is, NOT recomputed. Use {@link #append} for live writes. FCNS arrays
+     * ({@code firstChild}, {@code nextSibling}) are left unchanged; they are rebuilt
+     * in bulk by {@link #rebuildFcns} after all slots are loaded.
+     */
+    public void loadSlot(int agentId, int slot, int parentSlot, int stateHash,
+                         int sessionId, float successScore, float salienceScore,
+                         long timestamp) {
+        Shard s = shard(agentId);
+        s.parentIds[slot]      = parentSlot;
+        s.stateHashes[slot]    = stateHash;
+        s.sessionIds[slot]     = sessionId;
+        s.successScores[slot]  = successScore;
+        s.salienceScores[slot] = salienceScore;
+        s.timestamps[slot]     = timestamp;
+        // firstChild[slot] and nextSibling[slot] stay -1 until rebuildFcns()
+    }
+
+    /**
+     * Rebuild {@code firstChild} and {@code nextSibling} from {@code parentIds} after
+     * all {@link #loadSlot} calls complete. Called only by {@code AgentRingFile}.
+     *
+     * <pre>
+     * Iterates slots 1..shardSize-1 in ASCENDING order and prepends each written slot
+     * to its parent's child list (same two-step FCNS invariant as append):
+     *
+     *   slot 1: chain from root → [1]
+     *   slot 2: chain from root → [2, 1]        (prepend: newest = firstChild)
+     *   slot N: chain from root → [N, N-1, …, 1]
+     *
+     * Ascending replay reproduces the exact live-engine sibling order for the pre-wrap
+     * case. Post-wrap: skipped slots (timestamp==0) leave the same stale-FCNS state
+     * the live engine has — bounded-walk guard (T-EPOCH) cures it in V2.
+     * </pre>
+     */
+    public void rebuildFcns(int agentId) {
+        Shard s = shard(agentId);
+        // Reset so no stale state leaks from a prior in-memory session.
+        java.util.Arrays.fill(s.firstChild,  -1);
+        java.util.Arrays.fill(s.nextSibling, -1);
+        // Prepend each written slot (ascending = oldest first → newest wins firstChild).
+        for (int slot = 1; slot < shardSize; slot++) {
+            if (s.timestamps[slot] == 0L) continue;
+            int parent = s.parentIds[slot];
+            s.nextSibling[slot] = s.firstChild[parent]; // FCNS step 1
+            s.firstChild[parent] = slot;                 // FCNS step 2
+        }
+    }
+
+    /**
+     * Restore the monotonic ring write head from the persisted header after bootstrap,
+     * so the next {@link #append} continues at the right slot. Called only by
+     * {@code AgentRingFile.bootstrapInto()} (Phase 2).
+     */
+    public void restoreWriteHead(int agentId, long writeHead) {
+        shard(agentId).writeHead = writeHead;
     }
 
     /** One agent's eight parallel arrays plus its ring write head. */
