@@ -14,6 +14,15 @@
 > FCNS rebuild (`loadSlot()` + `rebuildFcns()` live in `SynapseGraph`), commit-bit
 > ordering (timestamp written last), and allocation-free bootstrap via primitive-args
 > `loadSlot()`. Changed sections are marked **[v1.3]**.
+>
+> **Revised 2026-06-07 by Phase 3 `/plan-eng-review`.** Four scoring/walk decisions:
+> `getBestNextThought` lives IN `SynapseGraph` (D1 — direct array access, consistent
+> with `getPathToRoot`/`countChildren`); `BestPathQuery.java` is **DROPPED** (never
+> created, walks were always in-engine); walk bound = `shardSize` not 64 (D2 — 64
+> would silently cap high-degree nodes since FCNS is newest-first); ΔTime uses smooth
+> `double` division + `max(0,…)` clamp to prevent sub-unit loss and future-timestamp
+> amplification (D3); full loop hardening — clock read once, `timestamp==0` skip,
+> `BestNextResult.NONE` sentinel (D4). Changed sections are marked **[v1.4]**.
 
 ---
 
@@ -138,25 +147,34 @@ while (ptr != 0 && count < maxDepth) {
 return count;  // number of slots written into out[]
 ```
 
-### getBestNextThought — O(degree), NOT O(n) **[v1.2]**
-The sibling walk is BOUNDED (max iterations) so a stale/cyclic chain from ring
-eviction can never hang the read path — mirrors getPathToRoot's maxDepth guard.
+### getBestNextThought — O(degree), NOT O(n) **[v1.4]**
+Lives in `SynapseGraph` (same class as `getPathToRoot` and `countChildren`).
+`BestPathQuery.java` was DROPPED — walks were always in-engine. The sibling walk is
+BOUNDED at `shardSize` (D2: NOT 64 — a small cap would silently truncate high-degree
+nodes since FCNS stores newest-first). Clock is read ONCE before the loop (D4). Slots
+with `timestamp==0` are skipped defensively (D4, T-EPOCH risk). Returns
+`BestNextResult.NONE` if no valid child exists.
 ```java
-int child = firstChild[currentSlot];   // jump to first child
+long now = clock.getAsLong();           // D4: single clock read
+int child = firstChild[currentSlot];
 int guard = 0;
-while (child != -1 && guard++ < SHARD_SIZE) {
-    float score = hebbianScore(child, sessionId, now);
-    // track best
-    child = nextSibling[child];          // jump to next sibling
+while (child != -1 && guard++ < shardSize) {   // D2: shardSize bound
+    if (timestamps[child] != 0L) {              // D4: skip empty/evicted slots
+        float score = HebbianScorer.score(..., now, ...);
+        // track best
+    }
+    child = nextSibling[child];
 }
 ```
 NEVER scan the full shard looking for `parentIds[i] == currentSlot`. That is O(n) and was explicitly rejected in design review.
 
-### Hebbian Scoring Formula
+### Hebbian Scoring Formula **[v1.4]**
 ```
 Score = successScore[i] * salienceScore[i] * exp(-λ * ΔTime) * sessionBoost
 
-ΔTime = (now - timestamps[i]) / DECAY_UNIT_MS
+ΔTime = Math.max(0.0, (now - timestamps[i]) / (double) decayUnitMs)
+        ^^^ smooth double (not long) division for sub-unit recency discrimination
+        ^^^ max(0,…) clamp prevents future/skewed timestamps from amplifying score
 λ = 0.1 (default, configurable via SYNAPSE_LAMBDA env var)
 sessionBoost = sessionIds[i] == currentSessionId ? 2.0f : 1.0f
 ```
@@ -236,10 +254,11 @@ JVM blocks it, unmap falls back to GC (V2 cure: FFM `MemorySegment.map(Arena)`).
 com.synapsedb
 ├── core/
 │   ├── SynapseGraph.java        # The 8 arrays, per-agent slices, ring buffer, append + FCNS
+│   │                            #   also: getBestNextThought, getPathToRoot, countChildren [v1.4]
 │   ├── MemoryConfig.java        # Constants: SHARD_SIZE, MAX_AGENTS, LAMBDA, etc. (fail-fast validated)
-│   ├── HebbianScorer.java       # Score formula, sessionBoost, decay math
-│   ├── BestPathQuery.java       # getBestNextThought (FCNS walk), getPathToRoot
-│   └── BestNextResult.java      # Record: bestSlot, bestScore
+│   ├── HebbianScorer.java       # Pure stateless score formula, sessionBoost, decay math [Phase 3]
+│   └── BestNextResult.java      # Record: bestSlot, bestScore [Phase 3]
+│   # NOTE: BestPathQuery.java was DROPPED (Phase 3 D1). Walks live in SynapseGraph. [v1.4]
 │
 ├── persistence/
 │   ├── AgentRingFile.java       # MappedByteBuffer management, writeRecord(), bootstrapInto()
@@ -257,7 +276,7 @@ com.synapsedb
 │
 ├── config/
 │   ├── ApiKeyConfigLoader.java  # Load api-keys.yml → ConcurrentHashMap at startup
-│   └── SynapseEngineConfig.java # @Bean wiring: SynapseGraph, BestPathQuery, AgentRingFile[]
+│   └── SynapseEngineConfig.java # @Bean wiring: SynapseGraph, AgentRingFile[] (BestPathQuery dropped) [v1.4]
 │
 └── SynapseDbApplication.java
 ```
