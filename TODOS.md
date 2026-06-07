@@ -41,3 +41,22 @@ Tracked follow-ups from `/plan-eng-review` (Phase 1 design review, 2026-06-06).
   the spec's multi-writer section should be marked "not yet correct."
 - **Depends on / blocked by:** A real requirement for >1 writer per agent shard
   (none today). Phase 6 concurrency work.
+
+## T-PERSIST-BENCH — Benchmark the integrated append()+writeRecord() hot path
+
+- **What:** A JMH benchmark of append-with-persistence once the Phase 4 wiring lands,
+  confirming the combined path still beats the `<1µs` / `>1M ops/sec` target after the
+  mmap `putXXX()` record write plus the header `writeHead` `putLong()` are added.
+- **Why:** Phase 1 benchmarked pure in-memory append (~48ns). Phase 2 deliberately does
+  NOT wire persistence into `append` (eng-review D1 chose decoupled persistence), so the
+  combined cost is unmeasured until Phase 4. The header `writeHead` write touches a
+  second page / cache line per append — plausibly fine, but unverified against the
+  CLAUDE.md headline target, which assumes append+persist together.
+- **Pros:** Closes the loop on the headline perf target with persistence actually on;
+  catches a regression at the phase boundary instead of in production.
+- **Cons:** Cannot run until Phase 4 wiring exists; a reminder, not actionable today.
+- **Context:** Decided in Phase 2 `/plan-eng-review` (D1 = decoupled persistence,
+  D4 = persist `header.writeHead` immediately after each record write). This TODO
+  ensures the decoupling didn't silently move the hot path out of benchmark coverage.
+- **Depends on / blocked by:** Phase 4 `SynapseEngineConfig` wiring of `AgentRingFile`
+  into the append path.

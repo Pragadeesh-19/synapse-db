@@ -1,5 +1,5 @@
 # Synapse-DB - Claude Code Project Context
-**Version 1.2 | Java 21 | Spring Boot 3.x | No external database**
+**Version 1.3 | Java 21 | Spring Boot 3.x | No external database**
 
 > **Revised 2026-06-06 by Phase 1 `/plan-eng-review`.** Eight design decisions
 > override the original v1.1 spec: 8 arrays (not 9 — `thoughtIds` dropped), slot 0
@@ -7,6 +7,13 @@
 > `absoluteIndex` array), explicit `-1` FCNS init, salience seeded from parent,
 > caller-provided path buffer, fail-fast config validation, and single-writer-only
 > for V1. Changed sections are marked **[v1.2]**.
+>
+> **Revised 2026-06-07 by Phase 2 `/plan-eng-review`.** Five persistence decisions:
+> decoupled persistence (`append()` stays pure — orchestrator calls `writeRecord()`),
+> `MappedByteBuffer` + `invokeCleaner()` unmap on `close()` for Windows, core owns
+> FCNS rebuild (`loadSlot()` + `rebuildFcns()` live in `SynapseGraph`), commit-bit
+> ordering (timestamp written last), and allocation-free bootstrap via primitive-args
+> `loadSlot()`. Changed sections are marked **[v1.3]**.
 
 ---
 
@@ -199,6 +206,28 @@ They are reconstructed from `parentSlot` relationships during bootstrap (one O(n
 Write path: `MappedByteBuffer.putXXX()` — writes go to OS page cache, no syscall, no GC.
 The OS flushes to disk. Never call `mmap.force()` on the hot path.
 
+**Commit-bit ordering [v1.3]:** `writeRecord()` writes `timestamp` LAST. A torn write
+(crash mid-record) leaves `timestamp == 0` in the file; bootstrap skips that slot as if
+it were empty. The field write order in `writeRecord()` is a contract — never change it.
+
+**Byte order [v1.3]:** `buffer.order(ByteOrder.BIG_ENDIAN)` must be called explicitly after
+every `MappedByteBuffer` construction on both write and read paths. Java's default is
+`BIG_ENDIAN`, but explicit is better — it makes the on-disk format self-documenting and
+safe against any future `ByteBuffer.allocate()` helper that defaults to little-endian.
+
+**Bootstrap API [v1.3]:** `AgentRingFile.bootstrapInto(graph)` calls
+`graph.loadSlot(agentId, slot, parent, hash, sess, succ, sal, ts)` — 8 primitive args,
+zero allocation — for each record where `timestamp != 0`, then calls
+`graph.rebuildFcns(agentId)` once. FCNS reconstruction lives in `SynapseGraph` (D3: one
+copy of the prepend invariant). After rebuild, `graph.restoreWriteHead(agentId, writeHead)`
+sets the ring head from the header so the next `append()` continues at the right slot.
+
+**Windows close() [v1.3]:** `AgentRingFile.close()` calls
+`sun.misc.Unsafe.invokeCleaner(buffer)` (via the `theUnsafe` reflective field) to force-
+unmap before returning. Without this, Windows keeps the file locked until GC, breaking
+any test that creates then deletes a ring file. The call is guarded by try/catch; if the
+JVM blocks it, unmap falls back to GC (V2 cure: FFM `MemorySegment.map(Arena)`).
+
 ---
 
 ## Package Layout
@@ -309,6 +338,8 @@ If append exceeds 1 μs, check: (1) FCNS lock contention, (2) MappedByteBuffer f
 - Do NOT add Elasticsearch as a dependency
 - Do NOT call `mmap.force()` on the hot path (only via explicit endpoint if needed)
 - Do NOT store `firstChild` or `nextSibling` in the ring file — reconstruct on bootstrap
+- Do NOT put FCNS rebuild logic in `AgentRingFile` — `SynapseGraph.rebuildFcns()` is the single source of truth for the prepend invariant **[v1.3]**
+- Do NOT write `timestamp` before the other record fields in `writeRecord()` — timestamp is the commit bit; write it last so a torn write leaves `timestamp == 0` and bootstrap skips the record **[v1.3]**
 - Do NOT return raw API keys after the registration response
 - Do NOT let agents access each other's shard ranges
 

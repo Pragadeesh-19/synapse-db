@@ -50,6 +50,7 @@ class SynapseGraphBenchmarkTest {
                 .include(AppendBenchmark.class.getSimpleName())
                 .include(PathToRootBenchmark.class.getSimpleName())
                 .include(WalkBenchmark.class.getSimpleName())
+                .include(BootstrapBenchmark.class.getSimpleName())
                 .forks(forks)
                 .resultFormat(ResultFormatType.TEXT)
                 .result("target/jmh-phase1-results.txt")
@@ -91,6 +92,7 @@ class SynapseGraphBenchmarkTest {
             case "pathToRoot"    -> "<10 µs";
             case "walkDegree5"   -> "<5 µs";
             case "walkDegree50"  -> "~10x deg5";
+            case "bootstrap"     -> "<200 ms";
             default              -> "—";
         };
     }
