@@ -10,7 +10,7 @@ import org.openjdk.jmh.runner.options.OptionsBuilder;
 import java.util.Collection;
 
 /**
- * Phase 1 exit-gate runner.  Invoked via:
+ * Phase 1 + Phase 3 exit-gate runner.  Invoked via:
  *
  * <pre>
  *   mvn test -Dtest=SynapseGraphBenchmarkTest
@@ -37,6 +37,11 @@ import java.util.Collection;
  *   <li>walk degree-50    : {@code ≈ 10×} degree-5 (confirms O(degree), not O(n))</li>
  * </ul>
  *
+ * <h2>Phase 3 targets</h2>
+ * <ul>
+ *   <li>best-next degree-5 : {@code < 5 µs} average (full Hebbian scoring loop)</li>
+ * </ul>
+ *
  * <p>This test does NOT assert on results because JMH numbers depend on hardware.
  * Review the printed table manually against the targets above.
  */
@@ -51,6 +56,7 @@ class SynapseGraphBenchmarkTest {
                 .include(PathToRootBenchmark.class.getSimpleName())
                 .include(WalkBenchmark.class.getSimpleName())
                 .include(BootstrapBenchmark.class.getSimpleName())
+                .include(BestNextBenchmark.class.getSimpleName())
                 .forks(forks)
                 .resultFormat(ResultFormatType.TEXT)
                 .result("target/jmh-phase1-results.txt")
@@ -88,12 +94,13 @@ class SynapseGraphBenchmarkTest {
 
     private static String targetFor(String name) {
         return switch (name) {
-            case "appendToRoot"  -> ">1M ops/s";
-            case "pathToRoot"    -> "<10 µs";
-            case "walkDegree5"   -> "<5 µs";
-            case "walkDegree50"  -> "~10x deg5";
-            case "bootstrap"     -> "<200 ms";
-            default              -> "—";
+            case "appendToRoot"       -> ">1M ops/s";
+            case "pathToRoot"         -> "<10 µs";
+            case "walkDegree5"        -> "<5 µs";
+            case "walkDegree50"       -> "~10x deg5";
+            case "bootstrap"          -> "<200 ms";
+            case "getBestNext_degree5" -> "<5 µs";
+            default                   -> "—";
         };
     }
 
