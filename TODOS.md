@@ -78,3 +78,41 @@ Tracked follow-ups from `/plan-eng-review` (Phase 1 design review, 2026-06-06).
   gate; this is the deferred scaling-confidence follow-up. Lives alongside the
   `BestNextBenchmark` added in Phase 3.
 - **Depends on / blocked by:** `BestNextBenchmark` (Phase 3).
+
+## T-KEY-PERSIST — Persist runtime-registered API key hashes across restart (Phase 4 follow-up)
+
+- **What:** Write runtime-minted key hashes (`sha256 → agentId+label`) to a durable
+  sidecar (or fold into the bootstrap path) so agents registered via `POST /api/v1/agents`
+  can still authenticate after a server restart.
+- **Why:** Phase 4 D3 keeps runtime keys **in-memory only** (honors "no runtime writes to
+  the key file"). The consequence: after a restart, a runtime-registered agent's ring-file
+  data survives but its key is gone, so it can no longer authenticate — a confusing
+  operational sharp edge. Pre-seeded `api-keys.yml` agents are unaffected.
+- **Pros:** Closes the one real gap in the in-memory-key decision; makes restart safe for
+  runtime agents without forcing operators to pre-seed every key.
+- **Cons:** Introduces runtime file writes the V1 spec deliberately deferred; needs its own
+  crash-safety story (torn write of a key record must not lock out an agent).
+- **Context:** Decided in Phase 4 `/plan-eng-review` (D3 = in-memory PUT + documented
+  limitation). Builds on `ApiKeyConfigLoader` + the in-memory `ConcurrentHashMap`. Natural
+  fit alongside the Phase 6 checksum/crash-safety work.
+- **Depends on / blocked by:** Phase 4 auth layer (`ApiKeyFilter`, `ApiKeyConfigLoader`).
+
+## T-SHARD-INT-OVERFLOW — Guard record-offset int arithmetic against large SHARD_SIZE (security/robustness)
+
+- **What:** `AgentRingFile.writeRecord` / `bootstrapInto` compute the record offset as
+  `int base = HEADER_SIZE + slot * RECORD_SIZE`. With `slot` up to `shardSize-1` and
+  `RECORD_SIZE = 32`, this `int` multiply overflows once `SYNAPSE_SHARD_SIZE > 2^26`
+  (~67M slots), silently writing records to wrong offsets / corrupting the file. The file
+  *size* calc already casts to `long`; the per-record `base` does not.
+- **Why:** `SYNAPSE_SHARD_SIZE` is operator-controlled config (trusted input), so this is
+  not an attacker-reachable vuln — but it's a latent correctness landmine that fails
+  silently rather than fast. Surfaced by Phase 4 `/cso` (H2, conf 8/10).
+- **Pros:** Either a `MemoryConfig` validation (`shardSize * RECORD_SIZE <= Integer.MAX_VALUE`,
+  fail-fast at startup) or computing `base` as `long` removes the landmine for one line.
+- **Cons:** Default `SHARD_SIZE` (1M → 32MB offset, well under 2^31) is safe today, so this
+  only matters for unusually large shard configs; low priority.
+- **Context:** Pre-existing since Phase 2 (`AgentRingFile.java:146,189`). `MemoryConfig`
+  already validates `maxAgents * shardSize <= Integer.MAX_VALUE` but not `shardSize *
+  RECORD_SIZE`. Prefer the fail-fast `MemoryConfig` guard — consistent with the existing
+  validation style and matches "fail fast, not silently."
+- **Depends on / blocked by:** none. Self-contained.
