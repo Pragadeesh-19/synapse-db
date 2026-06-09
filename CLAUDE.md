@@ -287,8 +287,10 @@ com.synapsedb
 │   │                            #   Also: register(), bestNext(), pathToRoot(), bootstrap(),
 │   │                            #   stats(). The ONLY home for the append+persist invariant.
 │   ├── AppendResult.java        # [v1.5] Record: slot, salience, persisted
+│   ├── MemoryStats.java         # [v1.5] Record: agentId, writeHead, usedSlots, capacity, fillPercent, wrapped
 │   └── exception/               # [v1.5 D4] UnknownAgentException(→404),
-│                                #   InvalidParentException(→409), ValidationException(→400)
+│                                #   InvalidParentException(→409), InvalidRequestException(→400),
+│                                #   ThoughtNotFoundException(→404), CapacityReachedException(→503)
 │
 ├── api/
 │   ├── controller/
@@ -310,9 +312,11 @@ com.synapsedb
 │   ├── ApiKeyConfigLoader.java  # Load api-keys.yml → ConcurrentHashMap<hash,AgentKeyRecord>
 │   │                            #   at startup. [v1.5 D3] Registration PUTs runtime keys
 │   │                            #   into this same map (in-memory only — no file write).
-│   └── SynapseEngineConfig.java # @Bean wiring: SynapseGraph + SynapseEngine. Ring files
-│                                #   are a runtime registry inside the engine, NOT a fixed
-│                                #   AgentRingFile[]. [v1.5 D1] (BestPathQuery dropped) [v1.4]
+│   ├── SynapseEngineConfig.java # @Bean wiring: SynapseGraph + SynapseEngine. Ring files
+│   │                            #   are a runtime registry inside the engine, NOT a fixed
+│   │                            #   AgentRingFile[]. [v1.5 D1] (BestPathQuery dropped) [v1.4]
+│   └── WebConfig.java           # WebMvcConfigurer: registers AgentAuthorizationInterceptor
+│                                #   on /api/v1/agents/** (Phase 4 CSO H1 defense-in-depth)
 │
 └── SynapseDbApplication.java
 ```
@@ -449,7 +453,7 @@ Build in this exact order — do not skip to the API layer before the core engin
    `append`), not Phase 3.
 2. **Phase 2 (Week 3):** `AgentRingFile` — write record + bootstrap roundtrip test
 3. **Phase 3 (Week 4):** `HebbianScorer` + `BestPathQuery` — full end-to-end flow
-4. **Phase 4 (Weeks 5-6):** Spring Boot API layer — all 5 endpoints
+4. **Phase 4 (Weeks 5-6):** Spring Boot API layer — all 6 endpoints
 5. **Phase 5 (Week 7):** Docker — single image, no compose, mount `/data` volume
 6. **Phase 6 (Weeks 8-9):** Checksums, rate limiting (Bucket4j), Micrometer metrics
 
