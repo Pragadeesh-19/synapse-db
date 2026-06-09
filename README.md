@@ -172,3 +172,5 @@ mvn clean package -DskipTests              # Fat JAR → target/synapse-db-*.jar
 | 4 — API | Shipped | Spring Boot REST API + auth + error model |
 | 5 — Docker | Shipped | Single image, /data + /config volumes, ZGC, non-root user |
 | 6 — Hardening | Planned | Checksums, rate limiting, Micrometer metrics |
+
+For design rationale and architecture decisions, see [ARCHITECTURE.md](./ARCHITECTURE.md).
