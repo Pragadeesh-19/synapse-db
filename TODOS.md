@@ -97,6 +97,23 @@ Tracked follow-ups from `/plan-eng-review` (Phase 1 design review, 2026-06-06).
   fit alongside the Phase 6 checksum/crash-safety work.
 - **Depends on / blocked by:** Phase 4 auth layer (`ApiKeyFilter`, `ApiKeyConfigLoader`).
 
+## T-HEALTHCHECK-ACTUATOR — Migrate Dockerfile HEALTHCHECK to /actuator/health (Phase 6 follow-up)
+
+- **What:** Replace `CMD curl -f http://localhost:8080/v3/api-docs` in the Dockerfile
+  HEALTHCHECK with `CMD curl -f http://localhost:8080/actuator/health` once Phase 6 adds
+  `spring-boot-starter-actuator`.
+- **Why:** `/v3/api-docs` is a springdoc endpoint — it works as a liveness proxy (200 when
+  the Spring context is up) but is semantically incorrect: it tests the API doc renderer,
+  not the app health contract. `/actuator/health` gives proper liveness and readiness
+  distinction and is the standard for containerized Spring Boot.
+- **Pros:** Correct semantic signal to Docker / Kubernetes; enables separate readiness
+  probes (e.g., warm-up period before serving traffic).
+- **Cons:** Requires `spring-boot-starter-actuator` as a new dependency; without it
+  `/actuator/health` returns 404 and the HEALTHCHECK immediately fails.
+- **Context:** Phase 5 uses `/v3/api-docs` as a zero-new-dependency proxy. This TODO
+  is the clean-up once Phase 6 adds actuator. Do NOT migrate without the actuator dep.
+- **Depends on / blocked by:** Phase 6 hardening (`spring-boot-starter-actuator`).
+
 ## T-SHARD-INT-OVERFLOW — Guard record-offset int arithmetic against large SHARD_SIZE (security/robustness)
 
 - **What:** `AgentRingFile.writeRecord` / `bootstrapInto` compute the record offset as

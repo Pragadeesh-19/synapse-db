@@ -22,6 +22,39 @@ backtrack to root in O(depth). Zero GC pauses on the hot path.
 
 ## Quickstart
 
+### Docker (recommended)
+
+```bash
+# 1. Prepare config (copy the sample; add pre-seeded keys or leave empty)
+cp config/api-keys.yml.sample config/api-keys.yml
+
+# 2. Build and run
+docker build -t synapse-db .
+docker run -d --name synapse \
+  -v "$(pwd)/data:/data" \
+  -v "$(pwd)/config:/config" \
+  -p 8080:8080 \
+  synapse-db
+
+# 3. Register an agent, then append a thought
+curl -s -X POST http://localhost:8080/api/v1/agents \
+  -H "Content-Type: application/json" \
+  -d '{"label": "my-agent"}'
+# {"agentId":1,"apiKey":"sk_syn_<uuid>"}  ← save the apiKey, shown once
+
+API_KEY="sk_syn_<uuid>"
+curl -s -X POST http://localhost:8080/api/v1/agents/1/thoughts \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: ${API_KEY}" \
+  -d '{"parentId":0,"stateHash":99482,"successScore":0.8,"sessionId":7}'
+# {"thoughtId":1,"slotIndex":1,"salienceScore":0.38,"persisted":true}
+```
+
+Data persists to `./data/` on the host. After `docker stop` + `docker start`, call
+`POST /api/v1/agents/{id}/bootstrap` to reload the shard from the ring file.
+
+### Local (Maven)
+
 ### Prerequisites
 
 - Java 21+
@@ -137,5 +170,5 @@ mvn clean package -DskipTests              # Fat JAR → target/synapse-db-*.jar
 | 2 — Persistence | Shipped | Binary ring file: mmap write + bootstrap |
 | 3 — Scoring | Shipped | HebbianScorer + getBestNextThought |
 | 4 — API | Shipped | Spring Boot REST API + auth + error model |
-| 5 — Docker | Planned | Single image, /data volume mount |
+| 5 — Docker | Shipped | Single image, /data + /config volumes, ZGC, non-root user |
 | 6 — Hardening | Planned | Checksums, rate limiting, Micrometer metrics |

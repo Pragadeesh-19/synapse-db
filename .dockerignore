@@ -1,0 +1,22 @@
+# Build artifacts (re-built in Docker builder stage)
+target/
+
+# Git history (not needed in build context)
+.git/
+
+# Runtime data — ring files are machine-local, never bake into image
+data/
+*.bin
+
+# Secrets — NEVER include in Docker build context
+config/api-keys.yml
+
+# IDE and local agent config
+.idea/
+.vscode/
+.claude/
+.gstack/
+
+# OS noise
+.DS_Store
+Thumbs.db
