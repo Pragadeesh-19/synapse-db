@@ -1,5 +1,5 @@
 # Synapse-DB - Claude Code Project Context
-**Version 1.3 | Java 21 | Spring Boot 3.x | No external database**
+**Version 1.5 | Java 21 | Spring Boot 3.x | No external database**
 
 > **Revised 2026-06-06 by Phase 1 `/plan-eng-review`.** Eight design decisions
 > override the original v1.1 spec: 8 arrays (not 9 — `thoughtIds` dropped), slot 0
@@ -23,6 +23,21 @@
 > `double` division + `max(0,…)` clamp to prevent sub-unit loss and future-timestamp
 > amplification (D3); full loop hardening — clock read once, `timestamp==0` skip,
 > `BestNextResult.NONE` sentinel (D4). Changed sections are marked **[v1.4]**.
+>
+> **Revised 2026-06-08 by Phase 4 `/plan-eng-review`.** Five API-layer decisions:
+> a `SynapseEngine` facade owns the append→read-back→`writeRecord` orchestration +
+> ring-file registry + per-agent lock (D1 — controllers stay thin, one home for the
+> persist invariant); writes are serialized by a **per-agent `ReentrantLock`** in the
+> engine because multi-threaded Tomcat would otherwise corrupt the lock-free
+> single-writer core (D2); runtime-minted API keys live **in-memory only** (D3 —
+> honors "no runtime file writes"; restart-loses-runtime-keys is a documented V1
+> limitation, cure tracked as `T-KEY-PERSIST`); a **full typed error model**
+> (`@Valid` DTOs + engine guard exceptions + one `@RestControllerAdvice`) replaces the
+> core's `assert` guards, which are OFF in production (D4); the auth filter uses an
+> **explicit `shouldNotFilter()` allowlist** (POST `/api/v1/agents`, swagger, api-docs)
+> (D5). Ring files are a `Map<Integer,AgentRingFile>` registry (NOT a fixed
+> `AgentRingFile[]`) since agents register at runtime. Changed sections are marked
+> **[v1.5]**.
 
 ---
 
@@ -264,22 +279,48 @@ com.synapsedb
 │   ├── AgentRingFile.java       # MappedByteBuffer management, writeRecord(), bootstrapInto()
 │   └── RingFileHeader.java      # Read/write the 64-byte file header
 │
+├── engine/
+│   ├── SynapseEngine.java       # [v1.5 D1] Orchestration facade. Owns SynapseGraph +
+│   │                            #   Map<Integer,AgentRingFile> registry + per-agent
+│   │                            #   ReentrantLock. appendThought() = append → read-back
+│   │                            #   ts+salience → writeRecord under the agent lock.
+│   │                            #   Also: register(), bestNext(), pathToRoot(), bootstrap(),
+│   │                            #   stats(). The ONLY home for the append+persist invariant.
+│   ├── AppendResult.java        # [v1.5] Record: slot, salience, persisted
+│   └── exception/               # [v1.5 D4] UnknownAgentException(→404),
+│                                #   InvalidParentException(→409), ValidationException(→400)
+│
 ├── api/
 │   ├── controller/
-│   │   ├── AgentController.java     # POST /api/v1/agents
+│   │   ├── AgentController.java     # POST /api/v1/agents — thin: DTO → engine.register()
 │   │   ├── ThoughtController.java   # POST /thoughts, GET /path-to-root, GET /best-next
 │   │   └── MemoryController.java    # POST /bootstrap, GET /stats
 │   ├── dto/                         # Request + Response records (one per endpoint)
+│   ├── error/
+│   │   └── GlobalExceptionHandler.java # [v1.5 D4] @RestControllerAdvice → clean JSON 4xx
 │   └── auth/
-│       ├── ApiKeyFilter.java        # OncePerRequestFilter: SHA-256 hash → lookup
+│       ├── ApiKeyFilter.java        # OncePerRequestFilter: SHA-256 hash → lookup.
+│       │                            #   [v1.5 D5] shouldNotFilter() allowlist: POST
+│       │                            #   /api/v1/agents, /swagger-ui/**, /v3/api-docs/**.
+│       │                            #   Else require X-Api-Key AND key.agentId == {id}.
+│       ├── AgentKeyRecord.java      # [v1.5] Record: agentId, label (value in the key map)
 │       └── AgentContext.java        # Request-scoped: agentId, label
 │
 ├── config/
-│   ├── ApiKeyConfigLoader.java  # Load api-keys.yml → ConcurrentHashMap at startup
-│   └── SynapseEngineConfig.java # @Bean wiring: SynapseGraph, AgentRingFile[] (BestPathQuery dropped) [v1.4]
+│   ├── ApiKeyConfigLoader.java  # Load api-keys.yml → ConcurrentHashMap<hash,AgentKeyRecord>
+│   │                            #   at startup. [v1.5 D3] Registration PUTs runtime keys
+│   │                            #   into this same map (in-memory only — no file write).
+│   └── SynapseEngineConfig.java # @Bean wiring: SynapseGraph + SynapseEngine. Ring files
+│                                #   are a runtime registry inside the engine, NOT a fixed
+│                                #   AgentRingFile[]. [v1.5 D1] (BestPathQuery dropped) [v1.4]
 │
 └── SynapseDbApplication.java
 ```
+
+> **[v1.5] Controllers are thin.** They map DTO ↔ engine calls only. They NEVER touch
+> `SynapseGraph` accessors or `AgentRingFile` directly — every mutation and read goes
+> through `SynapseEngine`, which holds the per-agent lock and the append+persist
+> invariant. This is the single most important boundary in the API layer.
 
 ---
 
@@ -311,9 +352,29 @@ All endpoints require `X-Api-Key` header. Auth is a servlet filter, not per-cont
 ## Authentication
 
 API keys are SHA-256 hashed and stored in `config/api-keys.yml`.
-Loaded at startup into `ConcurrentHashMap<String, AgentKeyRecord>`.
+Loaded at startup into `ConcurrentHashMap<String, AgentKeyRecord>` (hash → agentId+label).
 Auth filter: hash the raw key from `X-Api-Key` header → map lookup → verify agentId matches path variable.
-No database. No runtime writes to the key file (V1).
+Use `commons-codec` `DigestUtils.sha256Hex` for hashing — do NOT hand-roll `MessageDigest`.
+No database. No runtime writes to the **key file** (V1).
+
+**[v1.5 D5] Filter allowlist.** `ApiKeyFilter.shouldNotFilter()` returns `true` ONLY for
+`POST /api/v1/agents` (registration — no key exists yet), `/swagger-ui/**`,
+`/swagger-ui.html`, and `/v3/api-docs/**`. Every `/api/v1/agents/{id}/**` route requires a
+valid `X-Api-Key` AND `key.agentId == {id}` (401 if missing/unknown, 403 if agent mismatch).
+
+**[v1.5 CSO-H1] Defense-in-depth agentId guard.** `ApiKeyFilter` extracts the agent id from
+the raw request URI with a regex; `AgentAuthorizationInterceptor` (registered in `WebConfig`
+for `/api/v1/agents/**`) re-checks the authenticated `AgentContext` against the `{id}` path
+variable Spring actually *resolved* — the same value bound to `@PathVariable int id`. This
+collapses authorization to one source of truth: if the filter's URI parse ever diverged from
+Spring's mapping, the interceptor returns 403 before the request reaches another agent's
+shard. Do NOT remove it — it is the authoritative agentId match.
+
+**[v1.5 D3] Runtime key lifecycle.** `POST /api/v1/agents` mints a new key and PUTs its
+hash into the in-memory `ConcurrentHashMap` — an in-memory write, NOT a file write, so the
+"no runtime writes to the key file" rule holds. **V1 limitation:** runtime-registered keys
+live only in memory, so a restart locks out those agents even though their ring-file data
+survives. Pre-seeded `api-keys.yml` agents are unaffected. Cure tracked as `T-KEY-PERSIST`.
 
 Raw key format: `sk_syn_{UUID without dashes}`
 Key is returned once at registration. Hash is stored. Raw key is never stored again.
@@ -331,6 +392,20 @@ Key is returned once at registration. Hash is stored. Raw key is never stored ag
   See TODOS.md `T-MULTIWRITER` for the correct acquire/release + `VarHandle` design.
 - Never use `synchronized` blocks on `SynapseGraph` methods — too coarse
 - Cross-agent reads are read-only (MESI Shared state) — no synchronization needed
+
+### API-layer write serialization **[v1.5 D2]**
+
+Tomcat is multi-threaded; the core is lock-free single-writer. To bridge them safely WITHOUT
+touching the core, `SynapseEngine` holds a `ConcurrentHashMap<Integer, ReentrantLock>` and
+takes the **per-agent** lock around every mutation (`appendThought`, `bootstrap`,
+`register`). Different agents never block each other; the lock is uncontended under normal
+single-writer-per-agent traffic. The lock lives in the engine, never in `SynapseGraph` (the
+"no `synchronized` on `SynapseGraph`" rule above is intact — the core stays lock-free).
+
+**V1 read limitation:** reads (`bestNext`, `pathToRoot`, `stats`) do NOT take the lock, so a
+read concurrent with a write to the *same* agent could observe a torn FCNS link mid-prepend.
+Safe under the V1 single-client-per-agent contract; the bounded walk guard prevents a hang.
+Full read/write safety is the `T-MULTIWRITER` acquire/release design.
 
 ---
 

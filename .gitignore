@@ -8,6 +8,14 @@ target/
 
 # Claude Code / gstack local agent config (not team-shared)
 .claude/
+.gstack/
+
+# Runtime data — memory-mapped ring files (binary, large, machine-local)
+/data/
+*.bin
+
+# Real API keys — only api-keys.yml.sample is committed; the live file holds secrets
+config/api-keys.yml
 
 # OS noise
 .DS_Store

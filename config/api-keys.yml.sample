@@ -1,0 +1,17 @@
+# Synapse-DB pre-seeded API keys (sample).
+#
+# Copy to api-keys.yml to pre-seed agents at startup. The file stores SHA-256 HASHES of
+# raw keys, never the raw keys themselves. Generate a hash for a raw key with:
+#
+#   printf '%s' 'sk_syn_yourrawkey' | sha256sum     # Linux/macOS
+#   (Get-FileHash -Algorithm SHA256 ...)            # or any sha256 tool
+#
+# Agents registered at runtime via POST /api/v1/agents do NOT appear here — their key
+# hashes live in memory only and are lost on restart (V1 limitation; see TODOS T-KEY-PERSIST).
+#
+# agentId must be unique and within [0, SYNAPSE_MAX_AGENTS).
+
+keys:
+  - agentId: 0
+    label: example-seed-agent
+    keyHash: 0000000000000000000000000000000000000000000000000000000000000000

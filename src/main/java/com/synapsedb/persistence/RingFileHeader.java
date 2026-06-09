@@ -17,7 +17,7 @@ import java.nio.ByteBuffer;
  *
  * <p>All gets/puts use absolute offsets — the buffer's position is never changed.
  */
-final class RingFileHeader {
+public final class RingFileHeader {
 
     static final long MAGIC   = 0x53594E4150534544L;
     static final int  VERSION = 1;
@@ -83,7 +83,7 @@ final class RingFileHeader {
     }
 
     /** Immutable snapshot of the header fields, returned by {@link #readAndValidate}. */
-    record Snapshot(int agentId, long writeHead, int activeSession) {}
+    public record Snapshot(int agentId, long writeHead, int activeSession) {}
 
     private RingFileHeader() {}
 }
