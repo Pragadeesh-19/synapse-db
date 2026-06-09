@@ -454,7 +454,12 @@ Build in this exact order — do not skip to the API layer before the core engin
 2. **Phase 2 (Week 3):** `AgentRingFile` — write record + bootstrap roundtrip test
 3. **Phase 3 (Week 4):** `HebbianScorer` + `BestPathQuery` — full end-to-end flow
 4. **Phase 4 (Weeks 5-6):** Spring Boot API layer — all 6 endpoints
-5. **Phase 5 (Week 7):** Docker — single image, no compose, mount `/data` volume
+5. **Phase 5 (Week 7):** Docker — single image (`eclipse-temurin:21-jre-jammy`), no compose,
+   mount `/data` (ring files) + `/config` (api-keys.yml), non-root user UID 1000,
+   `-XX:+UseZGC -XX:+ZGenerational -XX:MaxRAMPercentage=75.0` (75% leaves 25% for mmap
+   page cache — correctness requirement, not tuning), `--add-opens jdk.unsupported/sun.misc=ALL-UNNAMED`
+   for `AgentRingFile.invokeCleaner()`, HEALTHCHECK on `/v3/api-docs` (migrate to
+   `/actuator/health` in Phase 6 — tracked as `T-HEALTHCHECK-ACTUATOR`)
 6. **Phase 6 (Weeks 8-9):** Checksums, rate limiting (Bucket4j), Micrometer metrics
 
 ---

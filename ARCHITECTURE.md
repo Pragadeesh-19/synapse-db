@@ -240,6 +240,52 @@ guard-free and allocation-free.
 
 ---
 
+## Docker deployment
+
+The JAR is packaged into a single container — no docker-compose, no external process.
+Two mount points must be bound to persistent host storage:
+
+```
+Host bind mounts (required)
+    ./data/   ─────────── /data   ← ring files (one per agent, ~32 MB each)
+    ./config/ ─────────── /config ← api-keys.yml (pre-seeded API key hashes)
+
+Container layout
+    /app/synapse-db.jar           ← fat JAR copied from builder stage
+    UID 1000 (synapse user)       ← non-root; /data and /config chowned at build time
+
+JVM flags (baked into ENTRYPOINT)
+    -XX:+UseZGC -XX:+ZGenerational      ← low-latency GC; no stop-the-world on write path
+    -XX:MaxRAMPercentage=75.0            ← 75% heap, 25% reserved for OS mmap page cache
+    --add-opens jdk.unsupported/sun.misc=ALL-UNNAMED
+                                         ← required for AgentRingFile.invokeCleaner()
+```
+
+### Why MaxRAMPercentage=75.0 matters for mmap
+
+The SoA arrays are heap-allocated Java objects. At 64 agents that is ~2.5 GB of arrays
+alone plus ~400 MB for Spring Boot. The OS also needs RAM to buffer dirty
+`MappedByteBuffer` pages before flushing them to disk. If the JVM heap takes 80–90% of
+container memory, page-cache gets squeezed — mmap writes page-fault on every record and
+the performance contract collapses. `MaxRAMPercentage=75.0` is a correctness requirement,
+not a tuning preference.
+
+### Volume mount contract
+
+| Mount | Required? | Lost without it |
+|-------|-----------|----------------|
+| `/data` | Yes | Ring files written inside container; lost on `docker stop` |
+| `/config` | Conditional | Pre-seeded keys absent; runtime-registered agents still work but lose keys on restart |
+
+### Multi-stage build
+
+Stage 1 (`eclipse-temurin:21-jdk-jammy AS builder`) runs `mvn package`. Stage 2
+(`eclipse-temurin:21-jre-jammy`) copies only the fat JAR — the final image contains
+no JDK, no Maven wrapper, no source code. This eliminates the stale-JAR risk (building
+outside Docker and then copying in) and produces a ~280 MB compressed image.
+
+---
+
 ## Known V1 limitations
 
 - **Runtime-registered keys are lost on restart** (`T-KEY-PERSIST`). Pre-seeded
