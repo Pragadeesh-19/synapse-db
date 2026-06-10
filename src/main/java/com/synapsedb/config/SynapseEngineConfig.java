@@ -2,6 +2,7 @@ package com.synapsedb.config;
 
 import com.synapsedb.core.MemoryConfig;
 import com.synapsedb.engine.SynapseEngine;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationRunner;
@@ -32,8 +33,8 @@ public class SynapseEngineConfig {
 
     /** {@code close()} unmaps every ring file on shutdown (Windows file-lock release). */
     @Bean(destroyMethod = "close")
-    public SynapseEngine synapseEngine(MemoryConfig memoryConfig) {
-        return new SynapseEngine(memoryConfig);
+    public SynapseEngine synapseEngine(MemoryConfig memoryConfig, MeterRegistry meterRegistry) {
+        return new SynapseEngine(memoryConfig, meterRegistry);
     }
 
     /**

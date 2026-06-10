@@ -12,6 +12,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -113,13 +114,17 @@ class AgentRingFileTest {
             ByteBuffer b = ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN);
             int base = AgentRingFile.HEADER_SIZE + AgentRingFile.RECORD_SIZE; // slot 1
 
-            assertEquals(1,     b.getInt  (base + 0),  "slotIndex");
+            // v2 layout: [+0] is CRC32C over bytes [+4..+31]; [+0..+3] is no longer slotIndex.
             assertEquals(0,     b.getInt  (base + 4),  "parentSlot");
             assertEquals(42,    b.getInt  (base + 8),  "stateHash");
             assertEquals(7,     b.getInt  (base + 12), "sessionId");
             assertEquals(0.8f,  b.getFloat(base + 16), 1e-6f, "successScore");
             assertEquals(0.55f, b.getFloat(base + 20), 1e-6f, "salienceScore");
             assertEquals(ts,    b.getLong (base + 24), "timestamp");
+            // Verify CRC32C at [+0] matches a recomputed checksum over bytes [+4..+31].
+            CRC32C crc = new CRC32C();
+            crc.update(raw, base + 4, 28);
+            assertEquals((int) crc.getValue(), b.getInt(base + 0), "crc32c");
         }
 
         @Test

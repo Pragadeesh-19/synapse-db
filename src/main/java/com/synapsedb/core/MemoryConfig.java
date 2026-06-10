@@ -29,12 +29,25 @@ public record MemoryConfig(
         String configDir,
         float emotionalThreshold) {
 
+    /**
+     * Maximum safe shard size for int record-offset arithmetic in AgentRingFile.
+     * HEADER_SIZE(64) + MAX_SHARD_SIZE * RECORD_SIZE(32) = 64 + 1073741824 < Integer.MAX_VALUE.
+     * Beyond this, {@code int base = HEADER_SIZE + slot * RECORD_SIZE} overflows silently.
+     */
+    public static final int MAX_SHARD_SIZE = 1 << 25; // 33,554,432 slots
+
     /** Compact constructor: fail-fast validation. Runs for every construction path. */
     public MemoryConfig {
         if (shardSize <= 0 || (shardSize & (shardSize - 1)) != 0) {
             throw new IllegalArgumentException(
                     "SHARD_SIZE must be a positive power of 2 (the ring buffer uses '& mask', "
                             + "not '%'); got " + shardSize);
+        }
+        if (shardSize > MAX_SHARD_SIZE) {
+            throw new IllegalArgumentException(
+                    "SHARD_SIZE " + shardSize + " exceeds MAX_SHARD_SIZE " + MAX_SHARD_SIZE
+                            + " (record-offset int arithmetic overflows beyond this; "
+                            + "use SYNAPSE_SHARD_SIZE ≤ " + MAX_SHARD_SIZE + ")");
         }
         if (maxAgents < 1) {
             throw new IllegalArgumentException("MAX_AGENTS must be >= 1; got " + maxAgents);

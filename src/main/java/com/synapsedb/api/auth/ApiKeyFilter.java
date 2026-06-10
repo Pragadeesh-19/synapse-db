@@ -5,6 +5,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -44,6 +45,7 @@ import java.util.regex.Pattern;
  * requires a valid key whose agent matches the URL.
  */
 @Component
+@Order(1)
 public final class ApiKeyFilter extends OncePerRequestFilter {
 
     static final String API_KEY_HEADER = "X-Api-Key";

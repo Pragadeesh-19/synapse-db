@@ -24,7 +24,7 @@ ENV SYNAPSE_CONFIG_DIR=/config
 EXPOSE 8080
 
 HEALTHCHECK --start-period=20s --interval=30s --timeout=5s --retries=3 \
-    CMD curl -f http://localhost:8080/v3/api-docs || exit 1
+    CMD curl -f http://localhost:9090/actuator/health || exit 1
 
 USER synapse
 

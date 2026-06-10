@@ -1,5 +1,5 @@
 # Synapse-DB - Claude Code Project Context
-**Version 1.5 | Java 21 | Spring Boot 3.x | No external database**
+**Version 1.6 | Java 21 | Spring Boot 3.x | No external database**
 
 > **Revised 2026-06-06 by Phase 1 `/plan-eng-review`.** Eight design decisions
 > override the original v1.1 spec: 8 arrays (not 9 — `thoughtIds` dropped), slot 0
@@ -23,6 +23,23 @@
 > `double` division + `max(0,…)` clamp to prevent sub-unit loss and future-timestamp
 > amplification (D3); full loop hardening — clock read once, `timestamp==0` skip,
 > `BestNextResult.NONE` sentinel (D4). Changed sections are marked **[v1.4]**.
+>
+> **Revised 2026-06-09 by Phase 6 hardening.** Six hardening decisions:
+> CRC32C commit bit (D1 — `slotIndex[+0]` repurposed as CRC32C over bytes `[+4..+31]`,
+> written LAST; VERSION bumped to 2; v1 files rejected at open time with clear message);
+> T-SHARD-INT-OVERFLOW closed by `MemoryConfig.MAX_SHARD_SIZE = 1 << 25` fail-fast guard
+> (D2 — consistent with existing validation style; default 1M shard is well within the
+> bound); Micrometer metrics at `SynapseEngine` boundary — timers (`synapse.append.latency`,
+> `synapse.bestnext.latency`), counters (`synapse.bootstrap.corrupt.skipped`,
+> `synapse.ringfile.open.failures`, `synapse.ratelimit.rejections`), gauge
+> (`synapse.shard.fill.percent`) (D3); Bucket4j rate limiting — per-agent 60/min
+> and per-IP registration 5/min, configurable via `SYNAPSE_RATELIMIT_*` env vars,
+> `@Order(2)` filter after `ApiKeyFilter` (D4); management port separation —
+> `management.server.port=9090`, only `health` and `prometheus` exposed, `ApiKeyFilter`
+> skips management traffic (D5); `GlobalExceptionHandler.noResource()` handles
+> `NoResourceFoundException` → 404 so management-server child context never returns 500
+> for unmatched actuator paths (D6). T-HEALTHCHECK-ACTUATOR closed: Dockerfile now uses
+> `curl -f http://localhost:9090/actuator/health`. Changed sections marked **[v1.6]**.
 >
 > **Revised 2026-06-08 by Phase 4 `/plan-eng-review`.** Five API-layer decisions:
 > a `SynapseEngine` facade owns the append→read-back→`writeRecord` orchestration +
