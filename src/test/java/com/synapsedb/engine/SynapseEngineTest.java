@@ -2,6 +2,7 @@ package com.synapsedb.engine;
 
 import com.synapsedb.core.BestNextResult;
 import com.synapsedb.core.MemoryConfig;
+import com.synapsedb.engine.exception.CapacityReachedException;
 import com.synapsedb.engine.exception.InvalidParentException;
 import com.synapsedb.engine.exception.InvalidRequestException;
 import com.synapsedb.engine.exception.ThoughtNotFoundException;
@@ -136,13 +137,13 @@ class SynapseEngineTest {
     }
 
     @Test
-    @DisplayName("capacity reached → IllegalStateException (maps to 503)")
+    @DisplayName("capacity reached → CapacityReachedException (maps to 503)")
     void capacityReached() {
         try (SynapseEngine engine = new SynapseEngine(cfg())) { // maxAgents = 4
             for (int i = 0; i < 4; i++) {
                 assertEquals(i, engine.registerNewAgent());
             }
-            assertThrows(IllegalStateException.class, engine::registerNewAgent);
+            assertThrows(CapacityReachedException.class, engine::registerNewAgent);
         }
     }
 

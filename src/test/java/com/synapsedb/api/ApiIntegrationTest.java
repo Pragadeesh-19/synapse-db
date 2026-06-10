@@ -2,6 +2,7 @@ package com.synapsedb.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.synapsedb.api.ratelimit.RateLimitProperties;
 import com.synapsedb.core.MemoryConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -40,7 +41,10 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = "spring.main.allow-bean-definition-overriding=true")
+        properties = {
+                "spring.main.allow-bean-definition-overriding=true",
+                "management.server.port=0"
+        })
 class ApiIntegrationTest {
 
     /** Override the engine config with a small shard + temp dirs (no api-keys.yml → no seeds). */
@@ -52,6 +56,17 @@ class ApiIntegrationTest {
             Path tmp = Files.createTempDirectory("synapse-it");
             return new MemoryConfig(64, 1024, 0.1f, 3_600_000L, 0.1f, 0.5f,
                     tmp.toString(), tmp.toString(), 0.7f);
+        }
+
+        /**
+         * High-capacity rate limits so the 14-test suite (and concurrentAppendsSameAgent's
+         * 50-thread storm) never hits the token-bucket ceiling within a single test JVM.
+         * Production defaults (60/min per-agent, 5/min per-IP) are kept for deployed builds.
+         */
+        @Bean
+        @Primary
+        RateLimitProperties rateLimitProperties() {
+            return new RateLimitProperties(100_000, 60, 100_000, 60);
         }
     }
 

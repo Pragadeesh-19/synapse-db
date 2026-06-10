@@ -20,7 +20,7 @@ import java.nio.ByteBuffer;
 public final class RingFileHeader {
 
     static final long MAGIC   = 0x53594E4150534544L;
-    static final int  VERSION = 1;
+    static final int  VERSION = 2;  // v2: slotIndex[+0] repurposed as CRC32C commit bit
     static final int  SIZE    = 64;
 
     private static final int OFF_MAGIC          =  0;
@@ -67,7 +67,10 @@ public final class RingFileHeader {
         int version = buf.getInt(OFF_VERSION);
         if (version != VERSION) {
             throw new IllegalStateException(
-                    "Ring file version mismatch: expected " + VERSION + ", got " + version);
+                    "Ring file version mismatch: expected v" + VERSION + ", got v" + version
+                            + " — delete ./data/agent-*.bin and re-register (v1 records have no CRC)."
+                            + " Note: runtime-registered API keys are in-memory only (T-KEY-PERSIST);"
+                            + " agents registered at runtime must be re-registered and new keys issued.");
         }
         int agentId = buf.getInt(OFF_AGENT_ID);
         if (agentId != expectedAgent) {
