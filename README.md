@@ -18,7 +18,7 @@ backtrack to root in O(depth). Zero GC pauses on the hot path.
 | Best-next, degree 5 | **0.211 µs** | < 5 µs |
 | Bootstrap, 1 M records | **43.5 ms** | < 200 ms |
 
-99 tests green.
+120 tests green.
 
 ## Quickstart
 
@@ -146,18 +146,22 @@ if pre-seeded; in-memory keys are lost on restart (tracked as `T-KEY-PERSIST`).
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `SYNAPSE_MAX_AGENTS` | 64 | Maximum number of registered agents |
-| `SYNAPSE_SHARD_SIZE` | 1048576 | Slots per agent (must be power of 2) |
+| `SYNAPSE_SHARD_SIZE` | 1048576 | Slots per agent (must be power of 2, max 33554432) |
 | `SYNAPSE_LAMBDA` | 0.1 | Hebbian temporal decay constant |
 | `SYNAPSE_DECAY_UNIT_MS` | 3600000 | Decay time unit (1 hour) |
 | `SYNAPSE_LEARNING_RATE` | 0.1 | Salience update rate |
 | `SYNAPSE_ROOT_BASE_SALIENCE` | 0.5 | Seed salience for slot 0 (synthetic root) |
 | `SYNAPSE_DATA_DIR` | ./data | Ring file directory |
 | `SYNAPSE_CONFIG_DIR` | ./config | api-keys.yml location |
+| `SYNAPSE_RATELIMIT_AGENT_CAPACITY` | 60 | Max requests per agent per period |
+| `SYNAPSE_RATELIMIT_AGENT_PERIOD_SEC` | 60 | Rate-limit refill period (seconds) for per-agent bucket |
+| `SYNAPSE_RATELIMIT_REG_CAPACITY` | 5 | Max registration requests per IP per period |
+| `SYNAPSE_RATELIMIT_REG_PERIOD_SEC` | 60 | Rate-limit refill period (seconds) for per-IP registration bucket |
 
 ## Running tests
 
 ```bash
-mvn test                                    # 99 tests
+mvn test                                    # 120 tests
 mvn test -pl . -Dtest=*BenchmarkTest        # JMH benchmarks
 mvn clean package -DskipTests              # Fat JAR → target/synapse-db-*.jar
 ```
@@ -171,4 +175,4 @@ mvn clean package -DskipTests              # Fat JAR → target/synapse-db-*.jar
 | 3 — Scoring | Shipped | HebbianScorer + getBestNextThought |
 | 4 — API | Shipped | Spring Boot REST API + auth + error model |
 | 5 — Docker | Shipped | Single image, /data + /config volumes, ZGC, non-root user |
-| 6 — Hardening | Planned | Checksums, rate limiting, Micrometer metrics |
+| 6 — Hardening | Shipped | CRC32C checksums (v2 ring file), Bucket4j rate limiting, Micrometer metrics + Prometheus actuator |

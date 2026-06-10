@@ -143,33 +143,42 @@ touches it — it inherited accumulated weight from the chain above it.
 ## Binary ring file
 
 Each agent has one pre-allocated binary file at `./data/agent-{agentId}.bin`.
+The v2 format (Phase 6) repurposes the old `slotIndex` field as a CRC32C
+commit bit, closing the torn-write window that v1 left after the timestamp write.
 
 ```
 Header (64 bytes):
   [0]  magic         long   0x53594E41505345_44L
-  [8]  version       int    1
+  [8]  version       int    2  (v2: CRC32C commit bit)
   [12] agentId       int
   [16] writeHead     long   monotonic counter
   [24] activeSession int
   [28] reserved      36 B
 
 Record layout (32 bytes each, at offset 64 + slot × 32):
-  [+0]  slotIndex     int
+  [+0]  crc32c        int    CRC32C over bytes [+4..+31] — WRITTEN LAST (commit bit)
   [+4]  parentSlot    int
   [+8]  stateHash     int
   [+12] sessionId     int
   [+16] successScore  float
   [+20] salienceScore float
-  [+24] timestamp     long   ← written LAST (commit bit)
+  [+24] timestamp     long
 ```
 
 File size: 64 B header + 1,048,576 × 32 B records = ~32 MB per agent.
 
-### Commit-bit ordering
+### Commit-bit ordering (v2 CRC32C)
 
-`writeRecord()` writes the `timestamp` field last. A crash mid-write leaves
-`timestamp == 0` in the file. Bootstrap skips any record where `timestamp == 0`,
-treating it as an empty or torn slot. This gives crash-safety without a WAL.
+`writeRecord()` writes fields `[+4..+31]` first (parent, state, session, scores,
+timestamp), then computes CRC32C over those 28 bytes and writes it at `[+0]` **last**.
+
+Bootstrap logic per slot:
+- `timestamp == 0` → empty/never-written slot; skip (pre-check avoids false CRC flag)
+- `timestamp != 0`, CRC mismatch → torn write (crash between data write and CRC write); skip and increment `synapse.bootstrap.corrupt.skipped` counter
+- `timestamp != 0`, CRC matches → valid record; call `graph.loadSlot()`
+
+A v1 file (VERSION=1) is rejected at open time with a clear message referencing "v2"
+so operators know to delete the old files and re-register.
 
 ### MappedByteBuffer
 
@@ -188,6 +197,47 @@ the in-memory FCNS structure changes.
 `AgentRingFile.close()` calls `sun.misc.Unsafe.invokeCleaner(buffer)` to force-unmap
 the `MappedByteBuffer` before returning. Without this, Windows keeps the file locked
 until GC, which breaks tests that delete ring files immediately after closing them.
+
+---
+
+## Rate limiting (Phase 6)
+
+`RateLimitFilter` (`@Order(2)`, runs after `ApiKeyFilter`) enforces two token-bucket
+strategies using Bucket4j:
+
+| Strategy | Key | Default | Notes |
+|----------|-----|---------|-------|
+| Per-agent | `agentId` (from `AgentContext`) | 60 req / 60 s | Applied to every `/api/v1/agents/{id}/**` route |
+| Per-IP registration | `request.getRemoteAddr()` | 5 req / 60 s | Applied to `POST /api/v1/agents` only |
+
+Buckets are in-memory `ConcurrentHashMap` entries — they reset on restart. Limits are
+configurable via `SYNAPSE_RATELIMIT_*` env vars (see Configuration). Distributed bucket
+support is deferred (`T-RATELIMIT-DISTRIBUTED`).
+
+A rejected request returns 429 Too Many Requests with `Retry-After` set to the bucket
+refill period. Every rejection increments the `synapse.ratelimit.rejections` counter
+(tagged by `type=agent` or `type=registration`).
+
+---
+
+## Micrometer metrics (Phase 6)
+
+All metrics are registered to the `MeterRegistry` injected into `SynapseEngine` and
+`RateLimitFilter`. In production, Spring Boot autoconfigures `PrometheusMeterRegistry`
+so `/actuator/prometheus` on the management port (9090) serves the full metric set.
+
+| Metric name | Type | Description |
+|-------------|------|-------------|
+| `synapse.append.latency` | Timer | Wall time of `appendThought()` incl. lock + persist |
+| `synapse.bestnext.latency` | Timer | Wall time of `bestNext()` FCNS walk + scoring |
+| `synapse.shard.fill.percent` | Gauge | `usedSlots / capacity * 100` per agent (tag: `agentId`) |
+| `synapse.bootstrap.corrupt.skipped` | Counter | Records skipped due to CRC mismatch on bootstrap |
+| `synapse.ringfile.open.failures` | Counter | Ring file open errors (I/O or version mismatch) |
+| `synapse.ratelimit.rejections` | Counter | 429 responses (tag: `type=agent\|registration`) |
+
+The management server runs on port 9090 (`management.server.port=9090`), separate from the
+API port (8080). `ApiKeyFilter` uses `shouldNotFilter()` to skip management traffic; only
+`/actuator/health` and `/actuator/prometheus` are exposed.
 
 ---
 
@@ -295,5 +345,7 @@ outside Docker and then copying in) and produces a ~280 MB compressed image.
   high churn.
 - **No multi-writer per shard** (`T-MULTIWRITER`). Tomcat writes are serialized by
   the engine lock; the core arrays have no synchronization.
-- **No checksum per record.** A torn write leaves `timestamp == 0` and is skipped on
-  bootstrap, but the other fields of a partially-written record are silently discarded.
+- **In-memory rate-limit buckets** reset on restart and are not shared across replicas
+  (`T-RATELIMIT-DISTRIBUTED`).
+- **Per-IP rate limiting** uses `getRemoteAddr()` which sees the proxy IP when deployed
+  behind nginx/Ingress (`T-TRUSTED-PROXY`).

@@ -58,6 +58,16 @@ Tracked follow-ups from `/plan-eng-review` (Phase 1 design review, 2026-06-06).
 - **Context:** Decided in Phase 2 `/plan-eng-review` (D1 = decoupled persistence,
   D4 = persist `header.writeHead` immediately after each record write). This TODO
   ensures the decoupling didn't silently move the hot path out of benchmark coverage.
+- **Phase 6 update (raised by `/review`):** the integrated append path now allocates on
+  every call where the core `graph.append()` does not — `CrcChecksum.compute()` does
+  `new CRC32C()` + `ByteBuffer.slice()` per record, and `SynapseEngine.appendThought`
+  wraps the body in `appendTimer.record(() -> …)` (a capturing lambda). The CLAUDE.md
+  "zero GC on the hot path" claim still holds for `SynapseGraph` but NOT for the engine
+  append. When this benchmark runs it must (a) confirm the combined path still beats
+  `<1µs`, and (b) check allocation rate (`-prof gc`). If it misses, the cures are a
+  thread-local `CRC32C` + direct-byte checksum (drops the slice) and recording the timer
+  via a non-capturing path. Until measured, treat the engine-append allocation-free claim
+  as unverified.
 - **Depends on / blocked by:** Phase 4 `SynapseEngineConfig` wiring of `AgentRingFile`
   into the append path.
 
@@ -97,39 +107,71 @@ Tracked follow-ups from `/plan-eng-review` (Phase 1 design review, 2026-06-06).
   fit alongside the Phase 6 checksum/crash-safety work.
 - **Depends on / blocked by:** Phase 4 auth layer (`ApiKeyFilter`, `ApiKeyConfigLoader`).
 
-## T-HEALTHCHECK-ACTUATOR — Migrate Dockerfile HEALTHCHECK to /actuator/health (Phase 6 follow-up)
+## T-HEALTHCHECK-ACTUATOR — **DONE (Phase 6)**
 
-- **What:** Replace `CMD curl -f http://localhost:8080/v3/api-docs` in the Dockerfile
-  HEALTHCHECK with `CMD curl -f http://localhost:8080/actuator/health` once Phase 6 adds
-  `spring-boot-starter-actuator`.
-- **Why:** `/v3/api-docs` is a springdoc endpoint — it works as a liveness proxy (200 when
-  the Spring context is up) but is semantically incorrect: it tests the API doc renderer,
-  not the app health contract. `/actuator/health` gives proper liveness and readiness
-  distinction and is the standard for containerized Spring Boot.
-- **Pros:** Correct semantic signal to Docker / Kubernetes; enables separate readiness
-  probes (e.g., warm-up period before serving traffic).
-- **Cons:** Requires `spring-boot-starter-actuator` as a new dependency; without it
-  `/actuator/health` returns 404 and the HEALTHCHECK immediately fails.
-- **Context:** Phase 5 uses `/v3/api-docs` as a zero-new-dependency proxy. This TODO
-  is the clean-up once Phase 6 adds actuator. Do NOT migrate without the actuator dep.
-- **Depends on / blocked by:** Phase 6 hardening (`spring-boot-starter-actuator`).
+Phase 6 added `spring-boot-starter-actuator`. The Dockerfile HEALTHCHECK now uses
+`CMD curl -f http://localhost:9090/actuator/health` on the management port (9090).
+This is the correct semantic signal — it exercises the Spring Boot health contract,
+not just the API doc renderer. No further action required.
 
-## T-SHARD-INT-OVERFLOW — Guard record-offset int arithmetic against large SHARD_SIZE (security/robustness)
+## T-SHARD-INT-OVERFLOW — **DONE (Phase 6)**
 
-- **What:** `AgentRingFile.writeRecord` / `bootstrapInto` compute the record offset as
-  `int base = HEADER_SIZE + slot * RECORD_SIZE`. With `slot` up to `shardSize-1` and
-  `RECORD_SIZE = 32`, this `int` multiply overflows once `SYNAPSE_SHARD_SIZE > 2^26`
-  (~67M slots), silently writing records to wrong offsets / corrupting the file. The file
-  *size* calc already casts to `long`; the per-record `base` does not.
-- **Why:** `SYNAPSE_SHARD_SIZE` is operator-controlled config (trusted input), so this is
-  not an attacker-reachable vuln — but it's a latent correctness landmine that fails
-  silently rather than fast. Surfaced by Phase 4 `/cso` (H2, conf 8/10).
-- **Pros:** Either a `MemoryConfig` validation (`shardSize * RECORD_SIZE <= Integer.MAX_VALUE`,
-  fail-fast at startup) or computing `base` as `long` removes the landmine for one line.
-- **Cons:** Default `SHARD_SIZE` (1M → 32MB offset, well under 2^31) is safe today, so this
-  only matters for unusually large shard configs; low priority.
-- **Context:** Pre-existing since Phase 2 (`AgentRingFile.java:146,189`). `MemoryConfig`
-  already validates `maxAgents * shardSize <= Integer.MAX_VALUE` but not `shardSize *
-  RECORD_SIZE`. Prefer the fail-fast `MemoryConfig` guard — consistent with the existing
-  validation style and matches "fail fast, not silently."
-- **Depends on / blocked by:** none. Self-contained.
+Phase 6 added `MemoryConfig.MAX_SHARD_SIZE = 1 << 25` (33,554,432 slots). The compact
+constructor now rejects any `SYNAPSE_SHARD_SIZE > MAX_SHARD_SIZE` at startup with a clear
+error message, preventing the silent int-overflow in `HEADER_SIZE + slot * RECORD_SIZE`.
+Default `SHARD_SIZE = 1 << 20` is well within the guard. No further action required.
+
+## T-RATELIMIT-DISTRIBUTED — Distributed rate limiting across replicas (Phase 6 follow-up)
+
+- **What:** Replace the in-memory Bucket4j `ConcurrentHashMap` buckets (per-agent and
+  per-IP) with a distributed store (Redis, Hazelcast, or Bucket4j's distributed
+  back-ends) so that rate limits survive restart and are shared across multiple replicas.
+- **Why:** Phase 6 ships in-memory token buckets that reset on every JVM restart. A
+  client that stays below 60 req/min across a restart is un-throttled for the window it
+  already consumed. With multiple replicas behind a load balancer, different instances
+  hold independent buckets — a client that hits each replica 60 times/min is effectively
+  un-throttled.
+- **Pros:** Correct rate limiting under horizontal scale and restart scenarios; Bucket4j
+  has first-class distributed back-ends.
+- **Cons:** New runtime dependency (Redis or equivalent); increased operational surface.
+- **Context:** Phase 6 `/plan-eng-review` accepted in-memory buckets as V1 (single
+  replica, restarts tolerated). Tracked explicitly because the current limit silently
+  degrades under scale.
+- **Depends on / blocked by:** Phase 6 rate-limiting (`RateLimitFilter`, `Bucket4j`).
+
+## T-RATELIMIT-IPBUCKETS-UNBOUNDED — Bound the per-IP bucket map (memory DoS)
+
+- **What:** `RateLimitFilter.ipBuckets` is a `ConcurrentHashMap<String, Bucket>` keyed by
+  `request.getRemoteAddr()` with no eviction. Every distinct source IP that hits
+  `POST /api/v1/agents` creates a permanent entry. Under a flood of distinct (or spoofed)
+  source addresses the map grows without bound → heap exhaustion. `agentBuckets` is NOT
+  affected (keyed by `agentId`, bounded by `maxAgents`).
+- **Why:** The registration bucket exists to throttle shard-allocation abuse, but the bucket
+  *store* itself becomes an amplification target — an attacker turns a rate-limit defence
+  into a memory-growth vector. Surfaced by Phase 6 `/review`.
+- **Pros:** A bounded/expiring cache (e.g. Caffeine with a TTL ≥ the refill period, or
+  Bucket4j's `ProxyManager` with expiry) caps memory while preserving the limit semantics.
+- **Cons:** Adds a cache dependency; tuning TTL vs. the refill window needs care so a bucket
+  isn't evicted while still rate-limiting an active attacker.
+- **Context:** Folds naturally into `T-RATELIMIT-DISTRIBUTED` (a distributed store solves
+  both unbounded growth and cross-replica sharing) and overlaps `T-TRUSTED-PROXY`.
+- **Depends on / blocked by:** Phase 6 rate-limiting (`RateLimitFilter`).
+
+## T-TRUSTED-PROXY — Honor X-Forwarded-For for per-IP rate limiting
+
+- **What:** `RateLimitFilter` keys the per-IP registration bucket on `request.getRemoteAddr()`,
+  which returns the reverse proxy's IP when Synapse-DB is deployed behind nginx/Ingress.
+  All registration requests appear to come from one IP — per-IP rate limiting is
+  effectively disabled in that topology.
+- **Why:** The registration bucket (5/min by default) is the primary defence against
+  shard-allocation abuse. If all requests share one bucket key (the proxy IP), the limit
+  applies to ALL registrations, not per originating client — wrong in both directions
+  (too strict if one legit admin registers many agents, too loose for a single bad actor).
+- **Pros:** Correct per-client accounting; consistent with how every other Spring Boot
+  rate-limiter reads client IP.
+- **Cons:** Requires an allowlist of trusted proxy CIDRs or a `ForwardedHeaderFilter`;
+  naively trusting `X-Forwarded-For` is an IP spoofing vector.
+- **Context:** Phase 6 shipped `getRemoteAddr()` as the safe default (no spoofing risk
+  without proxy trust). Fix requires deciding whether Synapse-DB ships a trusted-proxy
+  config or delegates header rewriting to the ingress layer.
+- **Depends on / blocked by:** Phase 6 rate-limiting (`RateLimitFilter`).
