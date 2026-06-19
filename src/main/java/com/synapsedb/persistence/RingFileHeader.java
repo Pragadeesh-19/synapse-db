@@ -20,7 +20,7 @@ import java.nio.ByteBuffer;
 public final class RingFileHeader {
 
     static final long MAGIC   = 0x53594E4150534544L;
-    static final int  VERSION = 2;  // v2: slotIndex[+0] repurposed as CRC32C commit bit
+    static final int  VERSION = 2;  // v2: record[+0] repurposed from slotIndex to CRC32C commit bit
     static final int  SIZE    = 64;
 
     private static final int OFF_MAGIC          =  0;

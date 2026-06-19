@@ -1,22 +1,8 @@
 package com.synapsedb.core;
 
 /**
- * Immutable engine configuration with fail-fast validation (eng-review C1).
- *
- * <p>Every constant that feeds the ring-buffer bitmask or the per-agent array
- * sizing is validated at construction. A bad value here (e.g. a non-power-of-2
- * {@code shardSize}) would otherwise corrupt every index <em>silently</em> via
- * {@code & shardMask} — the worst class of bug to diagnose. We refuse to start
- * instead.
- *
- * <pre>
- *   env / defaults ──▶ fromEnv() ──▶ compact ctor validation ──▶ immutable config
- *                                         │
- *                                         ├─ shardSize power-of-2 & &gt; 0
- *                                         ├─ maxAgents &ge; 1
- *                                         ├─ (long)maxAgents*shardSize ≤ Integer.MAX_VALUE
- *                                         └─ rates/salience finite & in range
- * </pre>
+ * Immutable engine configuration. Fail-fast at construction: a non-power-of-2
+ * {@code shardSize} would otherwise corrupt every ring index silently via {@code & shardMask}.
  */
 public record MemoryConfig(
         int maxAgents,
@@ -36,7 +22,6 @@ public record MemoryConfig(
      */
     public static final int MAX_SHARD_SIZE = 1 << 25; // 33,554,432 slots
 
-    /** Compact constructor: fail-fast validation. Runs for every construction path. */
     public MemoryConfig {
         if (shardSize <= 0 || (shardSize & (shardSize - 1)) != 0) {
             throw new IllegalArgumentException(
@@ -52,8 +37,7 @@ public record MemoryConfig(
         if (maxAgents < 1) {
             throw new IllegalArgumentException("MAX_AGENTS must be >= 1; got " + maxAgents);
         }
-        // Even with per-agent slices we keep slot ids in 'int'. Guard the ceiling so a
-        // future bump of either knob can't silently overflow an int index.
+        // Slot ids are int; guard the ceiling so a future knob bump can't silently overflow.
         long maxAddressable = (long) maxAgents * (long) shardSize;
         if (maxAddressable > Integer.MAX_VALUE) {
             throw new IllegalArgumentException(

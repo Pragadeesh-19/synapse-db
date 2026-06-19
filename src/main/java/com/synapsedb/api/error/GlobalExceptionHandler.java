@@ -21,9 +21,9 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 import java.util.stream.Collectors;
 
 /**
- * [D4] Single home that maps every engine/validation exception to a clean JSON
- * {@link ApiError}. The core's {@code assert} guards are OFF in production, so this
- * advice (plus {@code @Valid} on the DTOs) is the real trust boundary.
+ * Maps every engine/validation exception to a clean JSON {@link ApiError}. The core's
+ * {@code assert} guards are OFF in production, so this advice (plus {@code @Valid} on
+ * DTOs) is the real trust boundary.
  *
  * <pre>
  *   UnknownAgentException        → 404
@@ -31,7 +31,7 @@ import java.util.stream.Collectors;
  *   InvalidParentException       → 409
  *   InvalidRequestException      → 400
  *   @Valid / type / missing-param→ 400
- *   IllegalStateException (full) → 503
+ *   CapacityReachedException     → 503
  *   anything else                → 500
  * </pre>
  */
@@ -71,7 +71,6 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, ex.getMessage(), req);
     }
 
-    /** Engine signals "server full" with a dedicated CapacityReachedException on registration. */
     @ExceptionHandler(CapacityReachedException.class)
     public ResponseEntity<ApiError> serviceUnavailable(CapacityReachedException ex, HttpServletRequest req) {
         return build(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), req);
