@@ -24,31 +24,18 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Orchestration facade over the lock-free core (Phase 4 eng-review D1). The ONLY place
- * that combines an in-memory {@code append()} with its on-disk {@code writeRecord()} —
- * controllers never touch {@link SynapseGraph} or {@link AgentRingFile} directly.
+ * Orchestration facade over the lock-free core. The only place that combines an in-memory
+ * {@code append()} with its on-disk {@code writeRecord()} — controllers never touch
+ * {@link SynapseGraph} or {@link AgentRingFile} directly.
  *
- * <pre>
- * Append orchestration (under the per-agent lock):
- *
- *   graph.append() ──▶ slot
- *        │
- *        ▼
- *   read back graph.timestampOf(slot), salienceOf(slot), writeHead(agent)
- *        │
- *        ▼
- *   ringFile.writeRecord(slot, …, ts, salience, writeHead)
- * </pre>
- *
- * <h2>Concurrency (D2)</h2>
- * Tomcat is multi-threaded; the core is lock-free single-writer. Every mutation
- * ({@link #appendThought}, {@link #bootstrap}, {@link #registerNewAgent}) takes a
+ * <h2>Concurrency</h2>
+ * Tomcat is multi-threaded; the core is lock-free single-writer. Every mutation takes a
  * <b>per-agent</b> {@link ReentrantLock}, so different agents never block each other.
  * The lock lives here, never in {@code SynapseGraph}.
  *
- * <h2>Metrics (Phase 6 D3)</h2>
- * Timers and counters are registered at the {@link SynapseEngine} boundary, NOT inside
- * {@code SynapseGraph.append()} — the pure 48 ns core stays allocation-free.
+ * <h2>Metrics</h2>
+ * Timers and counters are registered at this boundary, not inside {@code SynapseGraph.append()}
+ * — the pure core stays allocation-free.
  */
 public final class SynapseEngine implements AutoCloseable {
 
@@ -75,10 +62,7 @@ public final class SynapseEngine implements AutoCloseable {
     private final Counter corruptSkippedCounter;
     private final Counter ringfileOpenFailureCounter;
 
-    /**
-     * Production constructor — injects a {@link MeterRegistry} provided by Spring Boot's
-     * Micrometer auto-configuration.
-     */
+    /** Injects a {@link MeterRegistry} from Spring Boot's Micrometer auto-configuration. */
     public SynapseEngine(MemoryConfig config, MeterRegistry meterRegistry) {
         this.config = config;
         this.graph = new SynapseGraph(config);
@@ -100,19 +84,14 @@ public final class SynapseEngine implements AutoCloseable {
                 .register(meterRegistry);
     }
 
-    /**
-     * Convenience constructor for tests and benchmarks — uses a no-op {@link SimpleMeterRegistry}
-     * so existing tests need no changes.
-     */
+    /** Constructor for tests and benchmarks — uses a no-op {@link SimpleMeterRegistry}. */
     public SynapseEngine(MemoryConfig config) {
         this(config, new SimpleMeterRegistry());
     }
 
     // ── Agent lifecycle ──────────────────────────────────────────────────────
 
-    /**
-     * Open the ring file and register the shard for a known agent id. Idempotent.
-     */
+    /** Open the ring file and register the shard for a known agent id. Idempotent. */
     public void registerExistingAgent(int agentId) {
         ReentrantLock lock = lockFor(agentId);
         lock.lock();
@@ -156,10 +135,7 @@ public final class SynapseEngine implements AutoCloseable {
 
     // ── Hot path: append + persist ─────────────────────────────────────────────
 
-    /**
-     * Append a thought and persist it atomically (per-agent lock). Timer covers the
-     * lock + core append + mmap write — the measurable hot path.
-     */
+    /** Append a thought and persist it atomically under the per-agent lock. */
     public AppendResult appendThought(int agentId, int parentId, int stateHash,
                                       float successScore, int sessionId) {
         ensureRegistered(agentId);
@@ -195,9 +171,7 @@ public final class SynapseEngine implements AutoCloseable {
                 graph.getBestNextThought(agentId, currentSlot, currentSessionId));
     }
 
-    /**
-     * Backtrack from {@code fromSlot} toward the root. Returns {@code {path, depth}}.
-     */
+    /** Backtrack from {@code fromSlot} toward the root. */
     public PathResult pathToRoot(int agentId, int fromSlot, int maxDepth) {
         ensureRegistered(agentId);
         int cap = Math.min(shardSize, MAX_PATH_DEPTH);
@@ -229,10 +203,7 @@ public final class SynapseEngine implements AutoCloseable {
 
     // ── Bootstrap (under lock) ─────────────────────────────────────────────────
 
-    /**
-     * Reload the agent's shard from its ring file. Increments the corrupt-skipped counter
-     * if any records had CRC mismatches.
-     */
+    /** Reload the agent's shard from its ring file. */
     public RingFileHeader.Snapshot bootstrap(int agentId) {
         ensureRegistered(agentId);
         ReentrantLock lock = lockFor(agentId);

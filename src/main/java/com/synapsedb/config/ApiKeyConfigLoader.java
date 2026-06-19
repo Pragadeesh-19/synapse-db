@@ -34,9 +34,9 @@ import java.util.stream.Collectors;
  *     keyHash: &lt;sha256hex of the raw key&gt;
  * </pre>
  *
- * <p><b>[D3] Runtime keys.</b> {@link #registerRuntimeKey} PUTs a newly minted key's hash
- * into the SAME map — an in-memory write, never a file write (honors "no runtime writes to
- * the key file"). V1 limitation: runtime keys are lost on restart (cure: {@code T-KEY-PERSIST}).
+ * <p><b>Runtime keys.</b> {@link #registerRuntimeKey} PUTs a newly minted key's hash into
+ * the same map — in-memory only, never a file write. V1 limitation: runtime keys are lost on
+ * restart (cure: {@code T-KEY-PERSIST}).
  */
 @Component
 public final class ApiKeyConfigLoader {
@@ -90,7 +90,7 @@ public final class ApiKeyConfigLoader {
         return Optional.ofNullable(byHash.get(DigestUtils.sha256Hex(rawKey)));
     }
 
-    /** [D3] Register a runtime-minted raw key in memory only. */
+    /** Register a runtime-minted raw key in memory only (never writes to the key file). */
     public void registerRuntimeKey(String rawKey, AgentKeyRecord record) {
         byHash.put(DigestUtils.sha256Hex(rawKey), record);
     }

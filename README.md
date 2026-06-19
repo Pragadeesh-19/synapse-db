@@ -18,7 +18,7 @@ backtrack to root in O(depth). Zero GC pauses on the hot path.
 | Best-next, degree 5 | **0.211 µs** | < 5 µs |
 | Bootstrap, 1 M records | **43.5 ms** | < 200 ms |
 
-120 tests green.
+123 tests green.
 
 ## Quickstart
 
@@ -161,10 +161,14 @@ if pre-seeded; in-memory keys are lost on restart (tracked as `T-KEY-PERSIST`).
 ## Running tests
 
 ```bash
-mvn test                                    # 120 tests
+mvn test                                    # 123 tests
 mvn test -pl . -Dtest=*BenchmarkTest        # JMH benchmarks
 mvn clean package -DskipTests              # Fat JAR → target/synapse-db-*.jar
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
 
 ## Project status
 

@@ -40,9 +40,9 @@ import java.util.regex.Pattern;
  *  set AgentContext, continue chain
  * </pre>
  *
- * [D5] The allowlist is exact and auditable: registration (no key yet) and the swagger/
- * api-docs pages are the only open paths. Everything else under {@code /api/v1/agents/}
- * requires a valid key whose agent matches the URL.
+ * The allowlist is exact: registration (no key exists yet) and swagger/api-docs are the
+ * only open paths. Everything else under {@code /api/v1/agents/} requires a valid key
+ * whose agent matches the URL.
  */
 @Component
 @Order(1)
@@ -50,7 +50,6 @@ public final class ApiKeyFilter extends OncePerRequestFilter {
 
     static final String API_KEY_HEADER = "X-Api-Key";
 
-    /** /api/v1/agents/{id}/...  — captures the numeric agent id. */
     private static final Pattern AGENT_PATH = Pattern.compile("^/api/v1/agents/(\\d+)(?:/.*)?$");
 
     private final ApiKeyConfigLoader keys;
@@ -62,11 +61,10 @@ public final class ApiKeyFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = pathWithinApp(request);
-        // Registration mints the first key — it cannot require one.
+        // Registration mints the first key — it cannot require one yet.
         if ("POST".equalsIgnoreCase(request.getMethod()) && path.equals("/api/v1/agents")) {
             return true;
         }
-        // API docs are open in V1.
         return path.startsWith("/swagger-ui")
                 || path.equals("/swagger-ui.html")
                 || path.startsWith("/v3/api-docs");

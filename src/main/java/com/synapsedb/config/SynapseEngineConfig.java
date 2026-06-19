@@ -10,16 +10,13 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Bean wiring for the engine layer (Phase 4 D1).
+ * Bean wiring for the engine layer.
  *
  * <pre>
  *   MemoryConfig.fromEnv()  ──▶  SynapseEngine (owns graph + ring-file registry + locks)
  *                                      ▲
  *   ApiKeyConfigLoader.seededAgentIds() ── seedAgents runner registers pre-seeded shards
  * </pre>
- *
- * Ring files are a runtime registry INSIDE the engine, not a fixed {@code AgentRingFile[]}
- * bean, because agents register at runtime.
  */
 @Configuration
 public class SynapseEngineConfig {

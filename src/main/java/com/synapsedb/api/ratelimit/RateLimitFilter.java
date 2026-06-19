@@ -70,7 +70,6 @@ public class RateLimitFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = pathWithinApp(request);
-        // Swagger, API-docs, and actuator are exempt from rate limiting.
         return path.startsWith("/swagger-ui")
                 || path.equals("/swagger-ui.html")
                 || path.startsWith("/v3/api-docs")

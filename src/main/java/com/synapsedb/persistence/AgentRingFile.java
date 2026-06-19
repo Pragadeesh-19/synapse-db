@@ -129,7 +129,7 @@ public final class AgentRingFile implements Closeable {
             }
             buf = ch.map(FileChannel.MapMode.READ_WRITE, 0, size);
         }
-        buf.order(ByteOrder.BIG_ENDIAN); // explicit — never rely on the default (D2 / v1.3)
+        buf.order(ByteOrder.BIG_ENDIAN); // explicit — Java's default is BIG_ENDIAN but can vary by allocator
 
         AgentRingFile rf = new AgentRingFile(agentId, shardSize, size, buf);
         if (isNew) {
@@ -143,19 +143,15 @@ public final class AgentRingFile implements Closeable {
     // ── Hot-path write ───────────────────────────────────────────────────────
 
     /**
-     * Persist one record to the ring file (hot path).
-     *
-     * <p>Write order (D4 / v1.3 updated for v2 CRC commit bit):
+     * Persist one record to the ring file (hot path). Write order:
      * <ol>
      *   <li>Write data fields [+4..+31] (parentSlot → timestamp inclusive)</li>
      *   <li>Compute CRC32C over bytes [+4..+31]</li>
-     *   <li>Write CRC32C at [+0] LAST — new commit bit</li>
+     *   <li>Write CRC32C at [+0] LAST — this is the commit bit</li>
      *   <li>Update header.writeHead</li>
      * </ol>
-     *
-     * <p>A crash between step 1 and step 3 leaves {@code crc == 0} or garbage. Bootstrap
-     * detects this as corrupt (ts != 0 but crc mismatch) and skips the slot. A crash
-     * before timestamp is written leaves ts == 0, caught by the pre-check first.
+     * A crash between steps 1 and 3 leaves crc == 0 or garbage; bootstrap skips that slot
+     * (ts != 0 but crc mismatch). A crash before timestamp leaves ts == 0, caught first.
      *
      * @param writeHead the monotonic counter value AFTER claiming this slot
      */
@@ -163,14 +159,13 @@ public final class AgentRingFile implements Closeable {
                             float successScore, float salienceScore, long timestamp,
                             long writeHead) {
         int base = HEADER_SIZE + slot * RECORD_SIZE;
-        // Step 1: write all data fields [+4..+31].
         buffer.putInt  (base + REC_PARENT,    parentSlot);
         buffer.putInt  (base + REC_HASH,      stateHash);
         buffer.putInt  (base + REC_SESSION,   sessionId);
         buffer.putFloat(base + REC_SUCCESS,   successScore);
         buffer.putFloat(base + REC_SALIENCE,  salienceScore);
         buffer.putLong (base + REC_TIMESTAMP, timestamp);
-        // Step 2+3: compute and write CRC32C LAST (commit bit).
+        // CRC written last — it is the commit bit (see writeRecord Javadoc for crash semantics).
         int crc = CrcChecksum.compute(buffer, base + CRC_DATA_OFFSET, CRC_DATA_LENGTH);
         buffer.putInt  (base + REC_CRC, crc);
         RingFileHeader.updateWriteHead(buffer, writeHead);
@@ -179,25 +174,11 @@ public final class AgentRingFile implements Closeable {
     // ── Bootstrap ────────────────────────────────────────────────────────────
 
     /**
-     * Reload this agent's shard from the ring file into {@code graph}.
+     * Reload this agent's shard from the ring file into {@code graph}: raw load with CRC
+     * verification (zero allocation), then FCNS rebuild, then write-head restore.
      *
-     * <pre>
-     * Phase 1 — raw load with CRC verification (zero allocation):
-     *   for slot in [1, shardSize):
-     *     ts = buffer[slot + REC_TIMESTAMP]
-     *     if ts == 0: skip (empty/never-written)
-     *     if CRC32C([+4..+31]) != stored CRC at [+0]: skip + corruptSkipped++
-     *     else: graph.loadSlot(...)
-     *
-     * Phase 2 — FCNS rebuild (one O(n) ascending-slot pass):
-     *   graph.rebuildFcns(agentId)
-     *
-     * Phase 3 — restore write head:
-     *   graph.restoreWriteHead(agentId, header.writeHead)
-     * </pre>
-     *
-     * @return {@link BootstrapResult} carrying the header snapshot and the count of
-     *         records skipped due to CRC mismatch (0 = clean, &gt;0 = partial writes detected)
+     * @return {@link BootstrapResult} with the header snapshot and count of records
+     *         skipped due to CRC mismatch (0 = clean, &gt;0 = partial writes detected)
      */
     public BootstrapResult bootstrapInto(SynapseGraph graph) {
         RingFileHeader.Snapshot snap = RingFileHeader.readAndValidate(buffer, agentId, fileSize);
@@ -209,9 +190,9 @@ public final class AgentRingFile implements Closeable {
         for (int slot = 1; slot < shardSize; slot++) {
             int  base = HEADER_SIZE + slot * RECORD_SIZE;
             long ts   = buffer.getLong(base + REC_TIMESTAMP);
-            if (ts == 0L) continue; // empty slot or torn write — pre-check
+            if (ts == 0L) continue; // empty slot — pre-check before CRC
 
-            // CRC verification: detects torn writes where timestamp was written but CRC was not.
+            // Detects torn writes where timestamp was written but CRC write was interrupted.
             int storedCrc   = buffer.getInt(base + REC_CRC);
             int computedCrc = CrcChecksum.compute(buffer, base + CRC_DATA_OFFSET, CRC_DATA_LENGTH);
             if (storedCrc != computedCrc) {
@@ -237,10 +218,9 @@ public final class AgentRingFile implements Closeable {
     /**
      * Unmap the file and release the OS file lock.
      *
-     * <p>Uses {@code sun.misc.Unsafe.invokeCleaner()} for deterministic unmap on
-     * Windows (D2 / v1.3). Without this, the file stays locked until GC, and any
-     * test that creates then deletes the temp file will fail with "file in use."
-     * Falls back to GC-unmap silently if the JVM blocks the reflective call.
+     * <p>Uses {@code sun.misc.Unsafe.invokeCleaner()} for deterministic unmap on Windows.
+     * Without this, the file stays locked until GC, breaking tests that create then delete
+     * a temp file ("file in use"). Falls back to GC-unmap silently if the JVM blocks the call.
      */
     @Override
     public void close() {

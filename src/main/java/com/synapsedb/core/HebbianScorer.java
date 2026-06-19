@@ -5,9 +5,8 @@ package com.synapsedb.core;
  *
  * <p>Formula: {@code successScore × salienceScore × exp(-λ × ΔTime) × sessionBoost}
  *
- * <p>ΔTime uses smooth double division (not long) so sub-unit recency provides
- * meaningful discrimination. Clamped to ≥ 0 so a restored/future timestamp never
- * produces exp(positive) > 1 amplification (Phase 3 eng-review D3).
+ * <p>ΔTime uses smooth {@code double} division so sub-unit recency provides meaningful
+ * discrimination. Clamped to ≥ 0 so a skewed/future timestamp never amplifies the score.
  */
 public final class HebbianScorer {
 
@@ -16,14 +15,8 @@ public final class HebbianScorer {
     /**
      * Score one candidate thought.
      *
-     * @param successScore    reinforcement signal (array field)
-     * @param salienceScore   accumulated Hebbian weight (array field)
-     * @param timestamp       epoch-millis when the thought was written
-     * @param sessionId       session that created the thought
-     * @param now             current epoch-millis (read ONCE per query, passed in)
-     * @param currentSessionId session currently active (for boost)
-     * @param lambda          decay rate (config.lambda())
-     * @param decayUnitMs     one decay unit in millis (config.decayUnitMs())
+     * @param now  current epoch-millis; must be read once per query by the caller and passed in
+     *             so all children are scored against the same instant
      */
     public static float score(float successScore, float salienceScore,
                               long timestamp, int sessionId,

@@ -13,15 +13,11 @@ import java.io.IOException;
 import java.util.Map;
 
 /**
- * Defense-in-depth agentId authorization (Phase 4 CSO H1).
- *
- * <p>{@link ApiKeyFilter} authenticates by extracting the agent id from the raw request URI
- * with a regex. This interceptor runs AFTER Spring's handler mapping and re-checks the
- * authenticated {@link AgentContext} against the {@code {id}} path variable Spring actually
- * resolved — the SAME value bound to {@code @PathVariable int id}. That collapses
- * authorization to a single source of truth: if the filter's URI parse ever diverged from
- * Spring's mapping (proxy rewrite, path-normalization change), the request is rejected here
- * instead of reaching another agent's shard.
+ * Defense-in-depth agentId check. {@link ApiKeyFilter} authenticates by parsing the agent id
+ * from the raw URI with a regex. This interceptor re-checks the authenticated {@link AgentContext}
+ * against the {@code {id}} path variable Spring actually resolved, collapsing authorization to one
+ * source of truth: if the filter's URI parse ever diverges from Spring's mapping (proxy rewrite,
+ * path-normalization change), the request is rejected here before reaching another agent's shard.
  */
 @Component
 public final class AgentAuthorizationInterceptor implements HandlerInterceptor {

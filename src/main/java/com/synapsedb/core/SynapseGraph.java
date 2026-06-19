@@ -5,37 +5,8 @@ import java.util.function.LongSupplier;
 /**
  * In-memory reasoning graph: eight parallel primitive arrays per agent
  * (Struct-of-Arrays) with a first-child / next-sibling (FCNS) tree and a
- * ring buffer write head.
- *
- * <p>Reflects the v1.2 eng-review decisions:
- * <ul>
- *   <li><b>8 arrays</b>, not 9 — {@code thoughtIds} dropped (slot index IS the id).</li>
- *   <li><b>Per-agent slices</b>, lazily allocated on {@link #registerAgent(int)} —
- *       no global {@code absoluteIndex}/base offset.</li>
- *   <li><b>Slot 0 is a reserved, never-evicted root.</b> Ring writes occupy
- *       {@code [1, shardSize-1]}; the write head skips 0 on wrap.</li>
- *   <li>FCNS arrays filled with {@code -1} at construction; an empty slot is
- *       {@code timestamps[slot] == 0}.</li>
- *   <li>Salience seeds from the parent, then adjusts by {@code successScore}.</li>
- *   <li>The sibling walk is <b>bounded</b> so a stale/cyclic chain from ring
- *       eviction can never hang the read path.</li>
- * </ul>
- *
- * <pre>
- * append(parent=P):
- *   claim slot S = writeHead &amp; mask   (if S==0 → skip root, S=1, writeHead++)
- *   if timestamps[S]!=0  → EVICT: firstChild[S]=nextSibling[S]=-1
- *   write fields; salience[S]=clamp(salience[P]+lr*success)
- *   firstChild[S] = -1                  (new node has no children yet)
- *   nextSibling[S] = firstChild[P]      (FCNS step 1: new → old first child)
- *   firstChild[P]  = S                  (FCNS step 2: parent → new child)
- *
- *      P                       P
- *      └▶ C (firstChild)  ==&gt;  └▶ S ─nextSibling▶ C
- * </pre>
- *
- * <p><b>Concurrency (v1.2):</b> single-writer-per-shard only. No synchronization.
- * The multi-writer recipe is shelved to V2 (see TODOS.md {@code T-MULTIWRITER}).
+ * ring buffer write head. Single-writer-per-shard; multi-writer is V2
+ * (see TODOS.md {@code T-MULTIWRITER}).
  */
 public final class SynapseGraph {
 
@@ -49,7 +20,7 @@ public final class SynapseGraph {
     private final float rootBaseSalience;
     private final LongSupplier clock;
 
-    /** One {@link Shard} per agent; null until {@link #registerAgent(int)}. */
+    // null until registerAgent(int)
     private final Shard[] shards;
 
     public SynapseGraph(MemoryConfig config) {
@@ -69,7 +40,7 @@ public final class SynapseGraph {
 
     // ── Agent lifecycle ──────────────────────────────────────────────────────
 
-    /** Lazily allocate an agent's ~36MB slice (eng-review P2). Idempotent. */
+    /** Lazily allocate an agent's ~36MB slice. Idempotent. */
     public void registerAgent(int agentId) {
         checkAgentId(agentId);
         if (shards[agentId] == null) {
@@ -86,9 +57,8 @@ public final class SynapseGraph {
     /**
      * Append a thought under {@code parentSlot}. O(1). Returns the new slot id.
      *
-     * <p>{@code parentSlot} is validated by a debug assert only (eng-review C2):
-     * the trust boundary is the API layer (Phase 4); the hot path stays unchecked
-     * in production builds. Run tests with {@code -ea} to exercise the asserts.
+     * <p>{@code parentSlot} is validated by a debug assert only: the trust boundary
+     * is the API layer; the hot path stays unchecked in production builds.
      */
     public int append(int agentId, int parentSlot, int stateHash, float successScore, int sessionId) {
         Shard s = shard(agentId);
@@ -98,26 +68,23 @@ public final class SynapseGraph {
         assert parentSlot == ROOT_SLOT || s.timestamps[parentSlot] != 0L
                 : "parentSlot points to an empty (never-written) slot: " + parentSlot;
 
-        // Claim a ring slot, skipping the reserved root (slot 0) on wrap.
         long wh = s.writeHead;
         int slot = (int) (wh & shardMask);
         if (slot == ROOT_SLOT) {
-            wh++;            // step over the reserved root position entirely
+            wh++;            // skip the reserved root slot on wrap
             slot = 1;
         }
         s.writeHead = wh + 1;
 
         assert parentSlot != slot : "self-parent: slot " + slot + " cannot parent itself";
 
-        // Eviction: if this slot was occupied, drop its outgoing FCNS links.
-        // (Stale chains pointing TO this slot are a documented V1 limitation; the
-        // bounded sibling walk below prevents them from hanging a reader.)
+        // Eviction: drop outgoing FCNS links. Stale chains pointing TO this slot are a
+        // V1 known limitation; the bounded sibling walk prevents them from hanging a reader.
         if (s.timestamps[slot] != 0L) {
             s.firstChild[slot] = -1;
             s.nextSibling[slot] = -1;
         }
 
-        // Write the record fields.
         s.parentIds[slot] = parentSlot;
         s.stateHashes[slot] = stateHash;
         s.sessionIds[slot] = sessionId;
@@ -125,15 +92,14 @@ public final class SynapseGraph {
         s.timestamps[slot] = clock.getAsLong();
         s.salienceScores[slot] = seedSalience(s.salienceScores[parentSlot], successScore);
 
-        // FCNS prepend. Order is load-bearing: link new→old first, THEN parent→new.
-        s.firstChild[slot] = -1;                       // new node has no children yet
+        // FCNS prepend — order is load-bearing: link new→old first, THEN parent→new.
+        s.firstChild[slot] = -1;
         s.nextSibling[slot] = s.firstChild[parentSlot]; // step 1
         s.firstChild[parentSlot] = slot;                // step 2
 
         return slot;
     }
 
-    /** Hebbian seed (eng-review A5): inherit parent salience, adjust by reinforcement, clamp [0,1]. */
     private float seedSalience(float parentSalience, float successScore) {
         float updated = parentSalience + learningRate * successScore;
         if (updated < 0f) return 0f;
@@ -144,11 +110,9 @@ public final class SynapseGraph {
     // ── Queries ──────────────────────────────────────────────────────────────
 
     /**
-     * Backtrack from {@code fromSlot} toward the root, writing slot ids into the
-     * caller-provided {@code out} buffer (eng-review P1: zero allocation). The root
-     * (slot 0) is the terminus and is NOT included. Returns the number of slots
-     * written. Bounded by {@code min(out.length, maxDepth)} so a corrupted parent
-     * chain can never loop forever.
+     * Backtrack from {@code fromSlot} toward the root into the caller-provided {@code out}
+     * buffer (zero allocation). Root slot 0 is the terminus and is not included. Returns
+     * the count written; bounded by {@code min(out.length, maxDepth)}.
      */
     public int getPathToRoot(int agentId, int fromSlot, int[] out, int maxDepth) {
         Shard s = shard(agentId);
@@ -163,11 +127,8 @@ public final class SynapseGraph {
     }
 
     /**
-     * Count the children of {@code parentSlot} via a BOUNDED FCNS sibling walk
-     * (eng-review A3 / T4). The guard caps iterations at {@code shardSize}, so even
-     * a cyclic chain produced by ring eviction returns a bounded result instead of
-     * hanging. This is the walk-safety foundation Phase 3's getBestNextThought
-     * (Hebbian scoring) will build on.
+     * Count the children of {@code parentSlot} via a bounded FCNS sibling walk.
+     * Guard caps at {@code shardSize} so a cyclic chain from ring eviction cannot hang.
      */
     public int countChildren(int agentId, int parentSlot) {
         Shard s = shard(agentId);
@@ -183,31 +144,21 @@ public final class SynapseGraph {
 
     /**
      * Walk the FCNS sibling chain from {@code currentSlot}'s first child and return
-     * the child with the highest Hebbian score. O(degree).
-     *
-     * <p>Phase 3 eng-review decisions applied here:
-     * <ul>
-     *   <li>D1: method lives in-engine (direct array access, no wrapper class).</li>
-     *   <li>D2: guard bound = {@code shardSize}, matching {@link #countChildren} —
-     *       NOT a small cap (64) that would silently truncate high-degree nodes.</li>
-     *   <li>D3: ΔTime uses smooth double division + max(0,…) clamp via
-     *       {@link HebbianScorer#score}.</li>
-     *   <li>D4: clock read ONCE before the loop; slots with {@code timestamp==0} are
-     *       skipped (defensive against stale ring-eviction links, T-EPOCH); returns
-     *       {@link BestNextResult#NONE} when no valid child exists.</li>
-     * </ul>
+     * the child with the highest Hebbian score. O(degree). Walk is bounded at
+     * {@code shardSize} — not a smaller cap — so high-degree nodes are never silently
+     * truncated. Returns {@link BestNextResult#NONE} when no valid child exists.
      */
     public BestNextResult getBestNextThought(int agentId, int currentSlot, int currentSessionId) {
         Shard s = shard(agentId);
-        long now = clock.getAsLong();           // D4: single clock read
+        long now = clock.getAsLong();           // read once so all children score against the same instant
         float lambda = config.lambda();
         long decayUnitMs = config.decayUnitMs();
         int bestSlot = -1;
         float bestScore = Float.NEGATIVE_INFINITY;
         int child = s.firstChild[currentSlot];
         int guard = 0;
-        while (child != -1 && guard++ < shardSize) { // D2: shardSize bound
-            if (s.timestamps[child] != 0L) {          // D4: skip empty/evicted slots
+        while (child != -1 && guard++ < shardSize) {
+            if (s.timestamps[child] != 0L) {          // timestamps[slot] == 0 is the empty-slot predicate
                 float sc = HebbianScorer.score(
                         s.successScores[child], s.salienceScores[child],
                         s.timestamps[child], s.sessionIds[child],
@@ -288,16 +239,12 @@ public final class SynapseGraph {
         shard(agentId).nextSibling[slot] = value;
     }
 
-    // ── Persistence support (Phase 2) ────────────────────────────────────────
+    // ── Persistence support ──────────────────────────────────────────────────
 
     /**
-     * Raw-load one persisted record into the agent's arrays without recomputing any
-     * derived field. Called only by {@code AgentRingFile.bootstrapInto()} (Phase 2).
-     *
-     * <p>Preserves the EXACT values from disk — salience and timestamp are restored
-     * as-is, NOT recomputed. Use {@link #append} for live writes. FCNS arrays
-     * ({@code firstChild}, {@code nextSibling}) are left unchanged; they are rebuilt
-     * in bulk by {@link #rebuildFcns} after all slots are loaded.
+     * Raw-load one persisted record into the agent's arrays without recomputing any derived
+     * field. Salience and timestamp are restored as-is. FCNS arrays are left at -1 until
+     * {@link #rebuildFcns} is called after all slots are loaded.
      */
     public void loadSlot(int agentId, int slot, int parentSlot, int stateHash,
                          int sessionId, float successScore, float salienceScore,
@@ -309,32 +256,19 @@ public final class SynapseGraph {
         s.successScores[slot]  = successScore;
         s.salienceScores[slot] = salienceScore;
         s.timestamps[slot]     = timestamp;
-        // firstChild[slot] and nextSibling[slot] stay -1 until rebuildFcns()
+        // firstChild and nextSibling stay -1 until rebuildFcns()
     }
 
     /**
-     * Rebuild {@code firstChild} and {@code nextSibling} from {@code parentIds} after
-     * all {@link #loadSlot} calls complete. Called only by {@code AgentRingFile}.
-     *
-     * <pre>
-     * Iterates slots 1..shardSize-1 in ASCENDING order and prepends each written slot
-     * to its parent's child list (same two-step FCNS invariant as append):
-     *
-     *   slot 1: chain from root → [1]
-     *   slot 2: chain from root → [2, 1]        (prepend: newest = firstChild)
-     *   slot N: chain from root → [N, N-1, …, 1]
-     *
-     * Ascending replay reproduces the exact live-engine sibling order for the pre-wrap
-     * case. Post-wrap: skipped slots (timestamp==0) leave the same stale-FCNS state
-     * the live engine has — bounded-walk guard (T-EPOCH) cures it in V2.
-     * </pre>
+     * Rebuild {@code firstChild} and {@code nextSibling} from {@code parentIds} after all
+     * {@link #loadSlot} calls complete. Ascending slot order means the newest written slot
+     * ends up as {@code firstChild}, matching live-engine prepend order.
      */
     public void rebuildFcns(int agentId) {
         Shard s = shard(agentId);
-        // Reset so no stale state leaks from a prior in-memory session.
+        // Reset first so no stale FCNS state leaks from a prior in-memory session.
         java.util.Arrays.fill(s.firstChild,  -1);
         java.util.Arrays.fill(s.nextSibling, -1);
-        // Prepend each written slot (ascending = oldest first → newest wins firstChild).
         for (int slot = 1; slot < shardSize; slot++) {
             if (s.timestamps[slot] == 0L) continue;
             int parent = s.parentIds[slot];
@@ -343,11 +277,7 @@ public final class SynapseGraph {
         }
     }
 
-    /**
-     * Restore the monotonic ring write head from the persisted header after bootstrap,
-     * so the next {@link #append} continues at the right slot. Called only by
-     * {@code AgentRingFile.bootstrapInto()} (Phase 2).
-     */
+    /** Restore the ring write head from the persisted header so the next append continues at the right slot. */
     public void restoreWriteHead(int agentId, long writeHead) {
         shard(agentId).writeHead = writeHead;
     }
@@ -376,14 +306,13 @@ public final class SynapseGraph {
             timestamps = new long[shardSize];
             salienceScores = new float[shardSize];
 
-            // FCNS "none" sentinel is -1, but Java zero-inits to 0 (eng-review A1).
+            // FCNS sentinel is -1, but Java zero-inits int[] to 0 — fill explicitly.
             java.util.Arrays.fill(firstChild, -1);
             java.util.Arrays.fill(nextSibling, -1);
 
-            // Reserve slot 0 as the synthetic root (eng-review A2). It is "written"
-            // (non-zero timestamp) so empty-slot detection never reclaims it, its
-            // parent is itself (path-to-root terminates at it), and it seeds the
-            // salience that children inherit.
+            // Slot 0 is the synthetic root: always "written" (non-zero timestamp) so
+            // empty-slot detection never reclaims it, and the path-to-root walk terminates
+            // at it. Its salience seeds the Hebbian weight that children inherit.
             parentIds[ROOT_SLOT] = ROOT_SLOT;
             timestamps[ROOT_SLOT] = (bornAt == 0L) ? 1L : bornAt;
             salienceScores[ROOT_SLOT] = rootBaseSalience;

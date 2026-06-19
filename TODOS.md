@@ -157,6 +157,52 @@ Default `SHARD_SIZE = 1 << 20` is well within the guard. No further action requi
   both unbounded growth and cross-replica sharing) and overlaps `T-TRUSTED-PROXY`.
 - **Depends on / blocked by:** Phase 6 rate-limiting (`RateLimitFilter`).
 
+## T-VALIDATE-PARENT-RACE — validateParentForAppend runs outside the per-agent lock (P1)
+
+- **What:** `SynapseEngine.appendThought()` calls `validateParentForAppend(agentId, parentId)`
+  before acquiring the per-agent `ReentrantLock`. The validation reads `timestamps[parentId]`
+  without the lock. A concurrent `appendThought` on the same agent can evict the parent slot
+  (ring wrap) between validation returning `true` and the lock being acquired. The subsequent
+  `graph.append()` proceeds with an evicted parent — silent FCNS graph corruption, no error
+  or log entry (the `assert` guard in `append()` is off in production).
+- **Fix:** Move `validateParentForAppend` inside the `lock.lock()` block in `appendThought()`,
+  or re-validate inside the lock before calling `graph.append()`.
+- **Context:** Surfaced by adversarial review during Phase 7 comment-cleanup PR (2026-06-19).
+- **Depends on / blocked by:** Phase 4 engine layer (`SynapseEngine.appendThought()`).
+
+## T-REGISTRY-LOCK-SPLIT — registerNewAgent (synchronized) vs registerExistingAgent (per-agent lock) share ringFiles with no common lock (P2)
+
+- **What:** `SynapseEngine.registerNewAgent()` takes `synchronized(this)`. `registerExistingAgent()`
+  takes only a per-agent `ReentrantLock`. Both methods read/write `ringFiles` with no common lock.
+  A concurrent pair of calls can allocate the same `agentId`, open two `AgentRingFile` handles
+  to the same path, and leave one unclosed (mmap + file-handle leak while both threads write to
+  the same `MappedByteBuffer`).
+- **Fix:** Unify registry mutations under a single `ReentrantLock registryLock`, or promote
+  `registerExistingAgent` to also use `synchronized(this)`.
+- **Context:** Surfaced by adversarial review during Phase 7 comment-cleanup PR (2026-06-19).
+- **Depends on / blocked by:** Phase 4 engine layer (`SynapseEngine`).
+
+## T-JSON-ESCAPE — reject() hand-rolled JSON omits control-character escaping (P2)
+
+- **What:** `ApiKeyFilter.escape()` and `AgentAuthorizationInterceptor.reject()` hand-roll JSON
+  error bodies, escaping only `\\` and `"`. Control characters (`\n`, `\r`, `\t`, U+0000–U+001F)
+  in a label or error message produce literal control chars inside a JSON string — invalid per
+  RFC 8259. Clients may reject or misbehave.
+- **Fix:** Use `ObjectMapper.writeValueAsString()` (Jackson is on the classpath) to serialize
+  error responses, or add control-character escaping to `escape()`.
+- **Context:** Surfaced by adversarial review during Phase 7 comment-cleanup PR (2026-06-19).
+- **Depends on / blocked by:** Phase 4 API layer (`ApiKeyFilter`, `AgentAuthorizationInterceptor`).
+
+## T-STATS-VOLATILE — stats() reads writeHead without lock; Prometheus scrape thread races with writer (P2)
+
+- **What:** `SynapseEngine.stats()` and the Micrometer fill-percent gauge callback read
+  `Shard.writeHead` without the per-agent lock. The field is not `volatile`. Prometheus scrape
+  threads can observe stale or inconsistent fill-percent values.
+- **Fix:** Declare `Shard.writeHead` as `volatile long` — sufficient for the V1 single-writer /
+  multi-reader model; adds no contention on the write path.
+- **Context:** Surfaced by adversarial review during Phase 7 comment-cleanup PR (2026-06-19).
+- **Depends on / blocked by:** Phase 4 engine layer, Phase 6 metrics.
+
 ## T-TRUSTED-PROXY — Honor X-Forwarded-For for per-IP rate limiting
 
 - **What:** `RateLimitFilter` keys the per-IP registration bucket on `request.getRemoteAddr()`,

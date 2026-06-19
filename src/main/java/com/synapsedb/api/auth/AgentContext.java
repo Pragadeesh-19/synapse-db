@@ -4,9 +4,7 @@ import jakarta.servlet.http.HttpServletRequest;
 
 /**
  * The authenticated identity for one request, stashed by {@link ApiKeyFilter} as a request
- * attribute after the key is verified. Controllers authorize off the {@code {id}} path
- * variable (which the filter already proved equals this agentId), so this is primarily for
- * logging and future use.
+ * attribute after the key is verified.
  *
  * @param agentId the authenticated agent
  * @param label   the key's label (may be null)
