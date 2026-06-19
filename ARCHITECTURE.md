@@ -349,3 +349,13 @@ outside Docker and then copying in) and produces a ~280 MB compressed image.
   (`T-RATELIMIT-DISTRIBUTED`).
 - **Per-IP rate limiting** uses `getRemoteAddr()` which sees the proxy IP when deployed
   behind nginx/Ingress (`T-TRUSTED-PROXY`).
+- **Parent validation runs outside the per-agent lock** (`T-VALIDATE-PARENT-RACE`). A
+  concurrent append on the same agent can evict the parent between validation and the
+  lock being acquired, causing silent FCNS graph corruption.
+- **Registry-lock split** (`T-REGISTRY-LOCK-SPLIT`). `registerNewAgent` (synchronized)
+  and `registerExistingAgent` (per-agent lock) share `ringFiles` with no common lock;
+  a concurrent pair can open two handles to the same ring file.
+- **Hand-rolled JSON in auth filters omits control-character escaping** (`T-JSON-ESCAPE`).
+  Labels with `\n`/`\r`/control chars produce invalid JSON per RFC 8259.
+- **`writeHead` is not volatile** (`T-STATS-VOLATILE`). Prometheus scrape threads reading
+  `stats()` or the fill-percent gauge can observe stale values under concurrent writes.
